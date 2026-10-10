@@ -1,0 +1,48 @@
+name: validate-skills
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate every skill
+        run: |
+          validator="skills/skill-authoring-standard/scripts/validate_skill.py"
+          if [ ! -f "$validator" ]; then
+            echo "::error::validator not found at $validator"
+            exit 1
+          fi
+
+          status=0
+          found=0
+          for skill in skills/*/; do
+            [ -f "${skill}SKILL.md" ] || continue
+            found=$((found + 1))
+            echo "::group::${skill}"
+            python "$validator" "$skill" || status=1
+            echo "::endgroup::"
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no skills found under skills/"
+            exit 1
+          fi
+
+          echo "validated $found skill(s)"
+          exit "$status"
