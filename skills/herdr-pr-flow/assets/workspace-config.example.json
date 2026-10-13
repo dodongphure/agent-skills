@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "controller": { "cli": "claude", "model": null, "extra_args": [] },
+    "developer": { "cli": "claude", "model": null, "extra_args": [] },
+    "reviewers": [
+      { "id": "reviewer-correctness", "cli": "opencode", "model": null, "extra_args": [], "focus": ["requirements", "correctness"] },
+      { "id": "reviewer-robustness", "cli": "omp", "model": null, "extra_args": ["--no-lsp"], "focus": ["security", "robustness", "tests"] }
+    ]
+  },
+  "workflow": {
+    "max_fix_attempts_per_finding": 3,
+    "max_task_minutes": 120,
+    "wait_timeout_ms": 300000,
+    "model_diversity": "warn"
+  },
+  "verification": { "required_checks": null },
+  "safety": {
+    "allow_stage": false,
+    "allow_commit": false,
+    "allow_push": false,
+    "allow_merge": false
+  }
+}

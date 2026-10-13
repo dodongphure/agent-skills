@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "task_id": "mock-demo",
+  "title": "MOCK ONLY - Local Herdr review report",
+  "status": "BLOCKED",
+  "requirements": ["Illustrate model-attributed review and fix history. This is not a real task."],
+  "plan": "MOCK DATA. Real Herdr sessions, changes and tests have not been performed. Configure a real workspace before use.",
+  "participants": [
+    {"id":"controller","role":"controller","cli":"claude","requested_model":"mock-controller","observed_model":null,"model_provenance":"MOCK - unverified"},
+    {"id":"developer","role":"developer","cli":"claude","requested_model":"mock-developer","observed_model":null,"model_provenance":"MOCK - unverified"},
+    {"id":"reviewer-correctness","role":"reviewer","cli":"opencode","requested_model":"mock/reviewer","observed_model":null,"model_provenance":"MOCK - unverified"},
+    {"id":"reviewer-robustness","role":"reviewer","cli":"omp","requested_model":"mock/robustness","observed_model":null,"model_provenance":"MOCK - unverified"}
+  ],
+  "snapshots": [
+    {"id":"mock-s1","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"id":"mock-s2","manifest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  ],
+  "final_snapshot_id": null,
+  "findings": [{"id":"reviewer-correctness-001","owner":"reviewer-correctness","severity":"high","path":"src/example.py","line":12,"snapshot_id":"mock-s1","body":"MOCK reviewer comment: the last item is omitted.","acceptance":"MOCK condition: cover the final item with a regression check.","status":"resolved","history":[{"actor":"developer","snapshot_id":"mock-s2","kind":"fix","body":"MOCK fix explanation: corrected the loop bound.","verdict":null,"diff":"- range(count - 1)\n+ range(count)"},{"actor":"reviewer-correctness","snapshot_id":"mock-s2","kind":"verification","body":"MOCK owner recheck: condition addressed.","verdict":"addressed"}]}],
+  "approvals": [{"reviewer":"reviewer-correctness","snapshot_id":"mock-s2","verdict":"approved","body":"MOCK approval only; not evidence of a real review."},{"reviewer":"reviewer-robustness","snapshot_id":"mock-s2","verdict":"cannot_verify","body":"MOCK: actual checks unavailable. Keep blocked."}],
+  "checks": [{"id":"mock-tests","snapshot_id":"mock-s2","argv":["not-executed"],"exit_code":null,"output":"No command run. MOCK ONLY.","required":true}],
+  "changes": [{"path":"src/example.py","diff":"--- baseline/src/example.py\n+++ candidate/src/example.py\n- range(count - 1)\n+ range(count)\nMOCK ONLY - no project source modified."}],
+  "timeline": [{"actor":"controller","kind":"mock_notice","body":"This example demonstrates rendering only. No real implementation or model review occurred.","snapshot_id":null},{"actor":"developer","kind":"mock_fix","body":"Illustrative fix submitted.","snapshot_id":"mock-s2"},{"actor":"reviewer-correctness","kind":"mock_verification","body":"Illustrative owner verification retained in thread.","snapshot_id":"mock-s2"},{"actor":"controller","kind":"blocked","body":"Not ready: second reviewer cannot verify and checks are not run.","snapshot_id":"mock-s2"}]
+}

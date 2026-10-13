@@ -22,6 +22,7 @@ npx skills add dodongphure/agent-skills --list
 | Skill | What it does |
 |---|---|
 | [`skill-authoring-standard`](skills/skill-authoring-standard/) | The authoring standard for agent skills: the rules, a starting template, and a deterministic validator |
+| [`herdr-pr-flow`](skills/herdr-pr-flow/) | Skill-first Herdr TUI orchestration with workspace configuration, developer/reviewer tabs, sequential fixes and a local PR-style HTML report; no automatic commits |
 
 ## Layout
 
