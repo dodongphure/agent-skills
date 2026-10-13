@@ -30,14 +30,15 @@ Do not commit.
 For a controller without supported slash invocation:
 
 > Read <absolute skill path>/SKILL.md and its configuration reference. Act as the
-> Herdr controller for this session and follow the workspace-config gate first.
+> Herdr controller for this session and follow the workflow-config gate first.
 
 ## First project use
 
-No `.agent-pr/config.json` means the skill must ASK before proceeding. It offers the
-included draft; user chooses exact CLI/model selectors and required project check argv.
-Approve values, then create the config. This does not authorize source changes until the
-user supplies an implement request. Never install/authenticate new providers automatically.
+No `.agent-pr/workflow.json` means the skill must ASK before proceeding (the file is not
+committed by default, but the workflow cannot run without it). It offers the included
+draft; user chooses exact CLI/model selectors and required project check argv. Approve
+values, then create the config. This does not authorize source changes until the user
+supplies an implement request. Never install/authenticate new providers automatically.
 
 ## TUI behavior
 
@@ -53,7 +54,7 @@ against the same project or mix Windows/WSL worker execution automatically.
 ## Existing plans
 
 Earlier app/runner-based planning HTML is historical, not the installed workflow. v1 follows
-SKILL.md and the included strict configuration schema; the older outputs/workspace-config
+SKILL.md and the included strict `.agent-pr/workflow.json` schema; the older outputs/ planning
 example uses a different proposed schema and must not be silently treated as active config.
 
 ## Verification status

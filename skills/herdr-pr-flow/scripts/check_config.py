@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only workspace configuration gate. No execution, network or writes."""
+"""Read-only workspace workflow-config gate. No execution, network or writes.
+
+Checks ``<project>/.agent-pr/workflow.json``. The file is not committed to the
+repository by default, but the workflow cannot run without it: an absent file
+returns CONFIG_REQUIRED so the caller stops and asks the user to configure.
+Structural validation only."""
 from __future__ import annotations
 import argparse
 import json
@@ -108,13 +113,13 @@ def load_config(workspace, config=None):
     root = Path(workspace).resolve(strict=True)
     if not root.is_dir():
         raise ConfigError("workspace must be an existing directory")
-    path = Path(config) if config else root / ".agent-pr" / "config.json"
+    path = Path(config) if config else root / ".agent-pr" / "workflow.json"
     if not path.is_absolute():
         path = root / path
     if path.is_symlink():
         raise ConfigError("configuration symlink requires explicit manual inspection")
     if not path.exists():
-        return {"status": "CONFIG_REQUIRED", "path": str(path), "message": "Ask the user to configure this workspace before dispatching or editing code."}, 3
+        return {"status": "CONFIG_REQUIRED", "path": str(path), "message": "No .agent-pr/workflow.json. Ask the user to configure this workspace before dispatching or editing code."}, 3
     if path.stat().st_size > 1024 * 1024:
         raise ConfigError("configuration exceeds 1 MiB")
     data = json.loads(path.read_text(encoding="utf-8"))

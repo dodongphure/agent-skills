@@ -35,10 +35,10 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(cfg.ConfigError):cfg.validate_config(data)
     def test_template_intentionally_invalid(self):
         with self.assertRaises(cfg.ConfigError):
-            cfg.validate_config(json.loads((ROOT/'assets/workspace-config.example.json').read_text()))
+            cfg.validate_config(json.loads((ROOT/'assets/workflow.example.json').read_text()))
     def test_read_existing(self):
         with tempfile.TemporaryDirectory() as t:
-            p=Path(t)/'.agent-pr';p.mkdir();(p/'config.json').write_text(json.dumps(valid()))
+            p=Path(t)/'.agent-pr';p.mkdir();(p/'workflow.json').write_text(json.dumps(valid()))
             self.assertEqual(cfg.load_config(t)[1],0)
 
 class SnapshotTests(unittest.TestCase):
@@ -63,7 +63,7 @@ class SnapshotTests(unittest.TestCase):
     def test_unsafe_scope(self):
         with tempfile.TemporaryDirectory() as t:
             root,task=self.setup_scope(t)
-            for path in ['../private','.git/config','.agent-pr/config.json','C:/private','a.txt/..','/private']:
+            for path in ['../private','.git/config','.agent-pr/workflow.json','C:/private','a.txt/..','/private']:
                 with self.subTest(path=path),self.assertRaises(ValueError):snap.capture(root,task,'unsafe',[path])
     def test_deletion(self):
         with tempfile.TemporaryDirectory() as t:

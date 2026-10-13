@@ -1,14 +1,18 @@
-# Workspace configuration and first-use consent
+# Workflow configuration and first-use consent
 
-Use `<project>/.agent-pr/config.json`. Resolve the project explicitly; never search all
-home directories or choose another workspace's configuration. A user-specified path
-must be approved and recorded. There is no inherited global default in v1.
+Use `<project>/.agent-pr/workflow.json`. It is not committed to the repository by
+default, but the workflow cannot run without it: when it is absent this skill must
+stop and ask the user to configure it before doing anything. Resolve the project
+explicitly; never search all home directories or choose another workspace's
+configuration. A user-specified path must be approved and recorded. There is no
+inherited global default in v1.
 
-## Missing file
+## Absent file
 
-Ask before creating any task files, launching agents or editing source:
+The file is not committed by default, yet it is required to run. When it is missing,
+ask before creating any task files, launching agents or editing source:
 
-> This workspace has no `.agent-pr/config.json`. Configure the controller,
+> This workspace has no `.agent-pr/workflow.json`. Configure the controller,
 > developer, at least one reviewer, and project checks before this workflow runs.
 > Shall I create a draft from the included template for you to review?
 
@@ -56,7 +60,7 @@ there is no approval quorum toggle or silently disabled reviewer. No credentials
 
 ## Config changes
 
-Freeze the approved JSON under the task as `config.resolved.json`. New settings apply to
+Freeze the approved JSON under the task as `workflow.resolved.json`. New settings apply to
 new tasks; a current controller's config model does not remotely change its live model.
 Ask before switching the running model. Keep machine-specific paths in separately approved
 configs, not automatic cross-environment overlays. Use forward slashes where accepted and
@@ -64,8 +68,9 @@ native APIs for resolution; do not translate C:/ paths to /mnt/c by guesswork.
 
 ## Optional read-only helper
 
-`check_config.py --workspace <project>` checks only `.agent-pr/config.json` and returns
-JSON. Exit 3 CONFIG_REQUIRED means ask the user; exit 2 INVALID_CONFIG means repair with
-consent; exit 0 CONFIG_VALID means structural checks passed. It does not create files,
+`check_config.py --workspace <project>` checks only `.agent-pr/workflow.json` and returns
+JSON. Exit 3 CONFIG_REQUIRED means the file is absent, so stop and ask the user to
+configure it; exit 2 INVALID_CONFIG means repair with consent; exit 0 CONFIG_VALID means
+structural checks passed. It does not create files,
 inspect live Herdr, validate native auth, execute checks or load skill instructions.
 `--config <explicit-path>` supports an already authorized alternate path.

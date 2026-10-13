@@ -328,7 +328,7 @@ class WriterTests(unittest.TestCase):
         task_dir = os.path.join(root, ".agent-pr", "tasks", "task-001")
         os.makedirs(task_dir)
         config = {"schema_version": 1, "roles": {"controller": {"cli": "claude", "model": "model-ctrl", "extra_args": []}, "developer": {"cli": "codex", "model": "model-dev", "extra_args": []}, "reviewers": [{"id": "rev1", "cli": "claude", "model": "model-rev", "extra_args": [], "focus": ["tests"]}]}, "workflow": {"max_fix_attempts_per_finding": 3, "max_task_minutes": 120, "wait_timeout_ms": 600000, "model_diversity": "warn"}, "verification": {"required_checks": [{"id": "c1", "argv": ["pytest", "-q"]}]}, "safety": {"allow_stage": False, "allow_commit": False, "allow_push": False, "allow_merge": False}}
-        self._write_json(os.path.join(task_dir, "config.resolved.json"), config)
+        self._write_json(os.path.join(task_dir, "workflow.resolved.json"), config)
         return root, task_dir
 
     def _write_json(self, path, data):
@@ -350,14 +350,14 @@ class WriterTests(unittest.TestCase):
 
     def test_missing_config_blocks_ready(self):
         _, task = self._workspace()
-        os.unlink(os.path.join(task, "config.resolved.json"))
+        os.unlink(os.path.join(task, "workflow.resolved.json"))
         self._write_json(os.path.join(task, "report.json"), make_report())
         with self.assertRaises(ValidationError):
             write_report(task)
 
     def test_configured_second_reviewer_cannot_be_omitted(self):
         _, task = self._workspace()
-        config_path = os.path.join(task, "config.resolved.json")
+        config_path = os.path.join(task, "workflow.resolved.json")
         with open(config_path) as handle:
             config = json.load(handle)
         second = dict(config["roles"]["reviewers"][0], id="rev2")
@@ -369,7 +369,7 @@ class WriterTests(unittest.TestCase):
 
     def test_configured_check_cannot_be_omitted(self):
         _, task = self._workspace()
-        config_path = os.path.join(task, "config.resolved.json")
+        config_path = os.path.join(task, "workflow.resolved.json")
         with open(config_path) as handle:
             config = json.load(handle)
         config["verification"]["required_checks"].append({"id": "lint", "argv": ["ruff", "check"]})
@@ -514,6 +514,86 @@ class WriterTests(unittest.TestCase):
                 write_report(task_dir)
         # The guard fired before writing, so no output was produced.
         self.assertFalse(os.path.exists(os.path.join(task_dir, "report.html")))
+
+
+class DiffParsingTests(unittest.TestCase):
+    """_parse_diff must use hunk state, not bare prefixes (review finding)."""
+
+    def test_added_line_starting_with_plus_is_an_addition(self):
+        # The added line's own text begins with "++", so the raw line is "+++counter;".
+        diff = (
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " a = 1\n"
+            "+++counter;\n"
+            " b = 2\n"
+        )
+        rows = list(render_report._parse_diff(diff))
+        self.assertEqual(rows[0][0], "meta")  # --- a/x.py  (file header)
+        self.assertEqual(rows[1][0], "meta")  # +++ b/x.py  (file header)
+        self.assertEqual(rows[2][0], "hunk")
+        added = [r for r in rows if r[0] == "add"]
+        self.assertEqual(len(added), 1, "the '+++counter;' line must be an addition")
+        self.assertEqual(added[0][1], "+++counter;")
+        self.assertEqual(added[0][3], 2, "added line must carry its new-file number")
+        self.assertEqual(render_report._diff_stat(diff), (1, 0))
+        html = render_report._diff_block(diff)
+        self.assertIn(
+            '<span class="dl dl-add"><span class="ln"></span>'
+            '<span class="ln">2</span><span class="code">+++counter;</span></span>',
+            html,
+        )
+
+    def test_removed_line_starting_with_minus_is_a_removal(self):
+        diff = (
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1,3 +1,2 @@\n"
+            " a = 1\n"
+            "---counter;\n"
+            " b = 2\n"
+        )
+        rows = list(render_report._parse_diff(diff))
+        removed = [r for r in rows if r[0] == "del"]
+        self.assertEqual(len(removed), 1, "the '---counter;' line must be a removal")
+        self.assertEqual(removed[0][1], "---counter;")
+        self.assertEqual(removed[0][2], 2, "removed line must carry its old-file number")
+        self.assertEqual(render_report._diff_stat(diff), (0, 1))
+
+    def test_headerless_fragment_still_classified_by_prefix(self):
+        # Hand-written fragments (and the bundled example) have no @@ header;
+        # prefix classification is the only signal available there.
+        diff = "--- a/x.py\n+++ b/x.py\n- old\n+ new\n"
+        kinds = [k for k, *_ in render_report._parse_diff(diff)]
+        self.assertEqual(kinds, ["meta", "meta", "del", "add"])
+        self.assertEqual(render_report._diff_stat(diff), (1, 1))
+
+    def test_second_hunk_uses_its_own_line_numbers(self):
+        diff = (
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-a\n"
+            "+b\n"
+            "@@ -10,1 +10,1 @@\n"
+            "-c\n"
+            "+d\n"
+        )
+        rows = list(render_report._parse_diff(diff))
+        self.assertEqual([r[3] for r in rows if r[0] == "add"], [1, 10])
+        self.assertEqual([r[2] for r in rows if r[0] == "del"], [1, 10])
+
+    def test_nonewline_marker_is_not_counted(self):
+        diff = (
+            "--- a/x.py\n+++ b/x.py\n@@ -1,1 +1,1 @@\n"
+            "-old\n+new\n\\ No newline at end of file\n"
+        )
+        self.assertEqual(render_report._diff_stat(diff), (1, 1))
+        self.assertEqual(
+            [r[0] for r in render_report._parse_diff(diff)],
+            ["meta", "meta", "hunk", "del", "add", "meta"],
+        )
 
 
 if __name__ == "__main__":

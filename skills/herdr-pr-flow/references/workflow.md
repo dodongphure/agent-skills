@@ -3,7 +3,7 @@
 ## Task storage
 
 After valid config and authorized task scope, use `.agent-pr/tasks/<unique-task-id>/`:
-- plan.json, config.resolved.json, paths.json (explicit scoped source/input file list)
+- plan.json, workflow.resolved.json, paths.json (explicit scoped source/input file list)
 - report.json (canonical display projection), report.html (single portable output)
 - events.jsonl (append-only accepted actions), state.json (current stage and pending requests)
 - outbox/<actor>/<request-id>.json, snapshots/<label>/manifest.json and source/
@@ -19,6 +19,26 @@ per-finding attempt counts, outstanding request IDs and last accepted event sequ
 task ID, actor, kind, request ID, snapshot ID and payload. Obtain time from OS/API, not mental
 arithmetic. Persist event before dispatch and receipt before next action. Ignore duplicate
 receipts only if identical; mismatched duplicate IDs block and preserve both for inspection.
+
+## Cross-tab events and live state
+
+`events.jsonl` is the append-only coordination log shared across every tab in the task.
+The controller is its only writer: each accepted action (dispatch, reply receipt, snapshot
+capture, finding, fix, verification, check run, approval, session reset, block) appends one
+JSON line. Worker tabs may READ it plus their own outbox to see current progress; they never
+append to it. Keep the envelope stable: `{seq, ts, task_id, actor, kind, request_id,
+snapshot_id, payload}`.
+
+A tab's CLI session is separate from Herdr's agent state, so track both:
+
+- Herdr agent state (`herdr agent get`, `herdr agent list`, `herdr agent wait --until ...`)
+  reports idle/working/blocked/done/unknown — a liveness signal only.
+- `events.jsonl` plus the actor's result file say WHAT actually happened for this task.
+
+Before a new task reuses a retained tab, verify the tab's CLI is in a fresh session; if it
+still holds a previous task, send that CLI's `/new` command and wait for `idle`. Append a
+`reset` event recording the previous and new `agent_session` so recovery can tell reused tabs
+apart. Never treat a reused tab's lingering scrollback as this task's output.
 
 ## Snapshot scope and diffs
 
@@ -58,7 +78,9 @@ For initial implementation use baseline ID as input, then controller captures ca
 For fix/review requests use current exact candidate ID; controller captures post-fix candidate.
 
 At least one reviewer. Two reviewers get the same candidate and independently submit before
-peer comments are shared. Pause developer during reviews. Each finding's owner is its reviewer
+peer comments are shared. Pause developer during reviews. Reviewers may run concurrently:
+their shared input is read-only and each writes only its own outbox, so there is no write
+contention; the developer stays paused until every report is collected. Each finding's owner is its reviewer
 ID, not merely its configured focus/model alias. Duplicate findings retain separate ownership;
 owner verification can share a fix but both owners must sign their finding records.
 

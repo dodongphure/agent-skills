@@ -31,6 +31,7 @@ import html
 import json
 import os
 import pathlib
+import re
 import string
 import tempfile
 
@@ -450,7 +451,7 @@ _CSS = """
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 }
 .page { max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }
 h1 { font-size: 22px; margin: 0 0 8px; }
@@ -462,7 +463,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; }
 .head { margin-bottom: 20px; }
 .meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin: 16px 0; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 14px; font-weight: 600; border: 1px solid transparent; text-transform: capitalize; }
 .st-planned { background: #21262d; color: var(--muted); border-color: var(--border); }
 .st-implementing { background: #12261e; color: var(--green); border-color: #1f6f43; }
 .st-reviewing { background: #12283d; color: var(--accent); border-color: #1f6feb; }
@@ -475,7 +476,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; }
 .role-reviewer { background: #2a1f3d; color: var(--purple); border-color: #8957e5; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+th { color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: .04em; }
 .unverified { color: var(--yellow); font-weight: 600; }
 ul.reqs { margin: 0; padding-left: 20px; }
 pre { margin: 8px 0 0; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; white-space: pre; }
@@ -483,24 +484,49 @@ pre.diff { border-left: 3px solid var(--accent); }
 .timeline { list-style: none; margin: 0; padding: 0; }
 .tl-item, .history-item { border-left: 2px solid var(--border); padding: 4px 0 12px 14px; margin-left: 4px; }
 .tl-head, .history-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 3px; }
-.kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; }
-.verdict { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 0 8px; }
+.kind { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; }
+.verdict { font-size: 14px; font-weight: 700; border-radius: 999px; padding: 0 8px; }
 .verdict.addressed { background: #12261e; color: var(--green); }
 .verdict.not_addressed { background: #2d1517; color: var(--red); }
-.sev { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 0 8px; }
+.sev { font-size: 14px; font-weight: 700; border-radius: 999px; padding: 0 8px; }
 .sev-high { background: #2d1517; color: var(--red); }
 .sev-medium { background: #2b2411; color: var(--yellow); }
 .sev-low { background: #21262d; color: var(--muted); }
-.fstatus { font-size: 11px; border-radius: 999px; padding: 0 8px; border: 1px solid var(--border); }
+.fstatus { font-size: 14px; border-radius: 999px; padding: 0 8px; border: 1px solid var(--border); }
 .fs-resolved { color: var(--green); }
 .fs-open { color: var(--red); }
 .fs-awaiting_verification { color: var(--yellow); }
 .finding { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; background: var(--panel-2); }
 .finding-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .field { margin: 6px 0; }
-.field .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.field .label { color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: .04em; }
+.field .value, .history-body { font-size: 16px; }
 .ok { color: var(--green); font-weight: 600; }
 .bad { color: var(--red); font-weight: 600; }
+/* Files-changed view: diff + anchored comments */
+.fileblock { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; overflow: hidden; background: var(--panel); }
+.filetoggle { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.filetoggle:not(:checked) ~ .filebody,
+.filetoggle:not(:checked) ~ .comments { display: none; }
+.filehead { background: var(--panel-2); padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; cursor: pointer; user-select: none; }
+.filehead:hover { background: var(--panel); }
+.filehead .chevron { flex: 0 0 auto; width: 0; height: 0; border-left: 6px solid var(--muted); border-top: 5px solid transparent; border-bottom: 5px solid transparent; transition: transform .12s ease; }
+.filetoggle:checked ~ .filehead .chevron { transform: rotate(90deg); }
+.filehead .path { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-weight: 600; }
+.filehead .stat { font-size: 14px; }
+.filehead .stat .ok { font-weight: 700; }
+.filehead .stat .bad { font-weight: 700; }
+.comments { padding: 6px 14px 12px; border-top: 1px dashed var(--border); }
+.diffview { margin: 0; border: none; border-radius: 0; padding: 0; background: var(--panel); overflow-x: auto; }
+.diffview .dl { display: flex; min-height: 1.35em; }
+.diffview .ln { flex: 0 0 auto; width: 3.6em; padding: 1px 10px 1px 0; text-align: right; color: var(--muted); user-select: none; font-variant-numeric: tabular-nums; }
+.diffview .code { flex: 1 1 auto; padding: 1px 8px; white-space: pre-wrap; word-break: break-word; }
+.diffview .dl-add { background: rgba(63,185,80,.15); }
+.diffview .dl-del { background: rgba(248,81,73,.15); }
+.diffview .dl-add .code { color: #7ee787; }
+.diffview .dl-del .code { color: #ffa198; }
+.diffview .dl-hunk .code { color: var(--purple); }
+.diffview .dl-meta .code { color: var(--muted); font-weight: 600; }
 """
 
 
@@ -569,65 +595,244 @@ def _render_timeline(data) -> str:
     return _section("Conversation timeline", '<ol class="timeline">' + "".join(items) + "</ol>")
 
 
-def _render_findings(data) -> str:
-    threads = []
-    for finding in data["findings"]:
-        history_items = []
-        for entry in finding["history"]:
-            diff_html = ""
-            if entry.get("diff"):
-                diff_html = f'<pre class="diff">{_esc(entry["diff"])}</pre>'
-            verdict_html = ""
-            if entry["verdict"] is not None:
-                verdict_html = (
-                    f' <span class="verdict {entry["verdict"]}">'
-                    f'{_esc(entry["verdict"])}</span>'
-                )
-            history_items.append(
-                '<li class="history-item">'
-                f'<div class="history-head"><span class="mono">{_esc(entry["actor"])}</span>'
-                f'<span class="kind">{_esc(entry["kind"])}</span>'
-                f'<span class="mono muted">{_esc(entry["snapshot_id"])}</span>'
-                f"{verdict_html}</div>"
-                f'<div class="history-body">{_esc(entry["body"])}</div>'
-                f"{diff_html}"
-                "</li>"
+def _actor_badge(actor) -> str:
+    """Badge for an (label, role) actor; empty when the actor is unknown."""
+    if not actor:
+        return ""
+    label, role = actor
+    if role in ("controller", "developer", "reviewer"):
+        return _badge(label, "role-" + role)
+    return ""
+
+
+def _finding_article(finding, actors) -> str:
+    """One review-thread card: comment -> fix -> owner verification."""
+    history_items = []
+    for entry in finding["history"]:
+        diff_html = ""
+        if entry.get("diff"):
+            diff_html = _diff_block(entry["diff"])
+        verdict_html = ""
+        if entry["verdict"] is not None:
+            verdict_html = (
+                f' <span class="verdict {entry["verdict"]}">'
+                f'{_esc(entry["verdict"])}</span>'
             )
-        history_html = (
-            '<ol class="timeline">' + "".join(history_items) + "</ol>"
-            if history_items
-            else '<p class="empty">No history.</p>'
+        actor_html = _actor_badge(actors.get(entry["actor"])) or (
+            f'<span class="mono">{_esc(entry["actor"])}</span>'
         )
-        threads.append(
-            '<article class="finding">'
-            '<div class="finding-head">'
-            f'<span class="mono">{_esc(finding["id"])}</span>'
-            f'<span class="sev sev-{finding["severity"]}">{_esc(finding["severity"])}</span>'
-            f'<span class="fstatus fs-{finding["status"]}">{_esc(finding["status"])}</span>'
-            f'<span class="mono muted">{_esc(finding["path"])}:{_esc(finding["line"])}</span>'
-            f'<span class="muted">owner {_esc(finding["owner"])}</span>'
-            f'<span class="mono muted">{_esc(finding["snapshot_id"])}</span>'
-            "</div>"
-            f'<div class="field"><div class="label">Body</div><div>{_esc(finding["body"])}</div></div>'
-            f'<div class="field"><div class="label">Acceptance</div><div>{_esc(finding["acceptance"])}</div></div>'
-            f'<div class="field"><div class="label">History</div>{history_html}</div>'
-            "</article>"
+        history_items.append(
+            '<li class="history-item">'
+            f'<div class="history-head">{actor_html}'
+            f'<span class="kind">{_esc(entry["kind"])}</span>'
+            f'<span class="mono muted">{_esc(entry["snapshot_id"])}</span>'
+            f"{verdict_html}</div>"
+            f'<div class="history-body">{_esc(entry["body"])}</div>'
+            f"{diff_html}"
+            "</li>"
         )
-    if not threads:
-        return _section("Review threads", '<p class="empty">No findings.</p>')
-    return _section("Review threads", "".join(threads))
+    history_html = (
+        '<ol class="timeline">' + "".join(history_items) + "</ol>"
+        if history_items
+        else '<p class="empty">No history.</p>'
+    )
+    owner = finding["owner"]
+    owner_html = _actor_badge(actors.get(owner)) or (
+        f'<span class="mono">{_esc(owner)}</span>'
+    )
+    return (
+        '<article class="finding">'
+        '<div class="finding-head">'
+        f'<span class="mono">{_esc(finding["id"])}</span>'
+        f'<span class="sev sev-{finding["severity"]}">{_esc(finding["severity"])}</span>'
+        f'<span class="fstatus fs-{finding["status"]}">{_esc(finding["status"])}</span>'
+        f'<span class="mono muted">{_esc(finding["path"])}:{_esc(finding["line"])}</span>'
+        f'<span class="muted">owner</span>{owner_html}'
+        f'<span class="mono muted">{_esc(finding["snapshot_id"])}</span>'
+        "</div>"
+        f'<div class="field"><div class="label">Body</div><div class="value">{_esc(finding["body"])}</div></div>'
+        f'<div class="field"><div class="label">Acceptance</div><div class="value">{_esc(finding["acceptance"])}</div></div>'
+        f'<div class="field"><div class="label">History</div>{history_html}</div>'
+        "</article>"
+    )
 
 
-def _render_changes(data) -> str:
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+# kind -> CSS class used by the diff renderer
+_DIFF_CSS = {
+    "meta": "dl-meta",
+    "hunk": "dl-hunk",
+    "add": "dl-add",
+    "del": "dl-del",
+    "ctx": "dl-ctx",
+    "nonewline": "dl-meta",
+}
+
+
+def _parse_diff(diff):
+    """Classify unified-diff rows by hunk state, not by bare prefix.
+
+    Yields ``(kind, text, old_no, new_no)`` where ``kind`` is one of ``meta``
+    (file headers, index/mode lines), ``hunk`` (a ``@@`` header), ``add``,
+    ``del``, ``ctx`` or ``nonewline``. Line numbers are 1-based ints for the
+    side they belong to, else ``None``.
+
+    Inside a hunk the first character decides the kind, so an added line whose
+    own text begins with ``++`` stays an addition instead of being mistaken for
+    a ``+++`` file header (git disambiguates by hunk state, not by prefix).
+    A diff with no ``@@`` header at all -- a hand-written fragment -- falls back
+    to prefix classification, the only signal it offers.
+    """
+    lines = diff.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    has_hunks = any(_HUNK_HEADER.match(line) for line in lines)
+    old_no = new_no = 1
+    old_left = new_left = 0
+    in_hunk = False
+    for line in lines:
+        if in_hunk:
+            if line.startswith("\\"):  # "\ No newline at end of file"
+                yield "nonewline", line, None, None
+                continue
+            if line.startswith("+"):
+                yield "add", line, None, new_no
+                new_no += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                yield "del", line, old_no, None
+                old_no += 1
+                old_left -= 1
+            else:  # context line, including a bare empty line in lenient diffs
+                yield "ctx", line, old_no, new_no
+                old_no += 1
+                new_no += 1
+                old_left -= 1
+                new_left -= 1
+            if old_left <= 0 and new_left <= 0:
+                in_hunk = False
+            continue
+        header = _HUNK_HEADER.match(line)
+        if header:
+            old_no = int(header.group(1))
+            new_no = int(header.group(3))
+            old_left = int(header.group(2)) if header.group(2) is not None else 1
+            new_left = int(header.group(4)) if header.group(4) is not None else 1
+            in_hunk = True
+            yield "hunk", line, None, None
+        elif line.startswith("@@"):
+            yield "meta", line, None, None  # malformed hunk header
+        elif not has_hunks and line.startswith("+"):
+            if line.startswith("+++"):
+                yield "meta", line, None, None
+            else:
+                yield "add", line, None, new_no
+                new_no += 1
+        elif not has_hunks and line.startswith("-"):
+            if line.startswith("---"):
+                yield "meta", line, None, None
+            else:
+                yield "del", line, old_no, None
+                old_no += 1
+        elif not has_hunks and not line.startswith("\\"):
+            yield "ctx", line, old_no, new_no
+            old_no += 1
+            new_no += 1
+        else:
+            yield "meta", line, None, None
+
+
+def _diff_block(diff: str) -> str:
+    """Render a unified diff GitHub-style: old/new line-number gutter + colour."""
+    rows = []
+    for kind, text, old_no, new_no in _parse_diff(diff):
+        old_cell = "" if old_no is None else str(old_no)
+        new_cell = "" if new_no is None else str(new_no)
+        rows.append(
+            f'<span class="dl {_DIFF_CSS[kind]}">'
+            f'<span class="ln">{old_cell}</span>'
+            f'<span class="ln">{new_cell}</span>'
+            f'<span class="code">{_esc(text)}</span>'
+            "</span>"
+        )
+    return f'<pre class="diffview">{"".join(rows)}</pre>'
+
+
+def _diff_stat(diff: str):
+    """Count added/removed lines with the same hunk-aware classification."""
+    added = removed = 0
+    for kind, _text, _old_no, _new_no in _parse_diff(diff):
+        if kind == "add":
+            added += 1
+        elif kind == "del":
+            removed += 1
+    return added, removed
+
+
+def _file_block(index, path, added, removed, n_comments, diff_html, comment_html) -> str:
+    """One collapsible file card: header toggle + diff + its review threads."""
+    if added is None:
+        stat = '<span class="stat muted">no diff recorded</span>'
+        body = ""
+    else:
+        stat = (f'<span class="stat"><span class="ok">+{added}</span> '
+                f'<span class="bad">-{removed}</span></span>')
+        body = f'<div class="filebody">{diff_html}</div>'
+    return (
+        '<article class="fileblock">'
+        f'<input class="filetoggle" type="checkbox" id="ft-{index}" checked>'
+        f'<label class="filehead" for="ft-{index}">'
+        '<span class="chevron" aria-hidden="true"></span>'
+        f'<span class="path">{_esc(path)}</span>'
+        f'{stat}'
+        f'<span class="muted">{n_comments} comment'
+        f'{"s" if n_comments != 1 else ""}</span>'
+        "</label>"
+        f"{body}"
+        f'<div class="comments">{comment_html}</div>'
+        "</article>"
+    )
+
+
+def _render_files_changed(data) -> str:
+    """Review threads & changes: each file's diff with its reviewers' comments."""
+    findings_by_path = {}
+    for finding in data["findings"]:
+        findings_by_path.setdefault(finding["path"], []).append(finding)
+    actors, seen = {}, {"controller": 0, "developer": 0, "reviewer": 0}
+    for participant in data["participants"]:
+        role = participant["role"]
+        seen[role] = seen.get(role, 0) + 1
+        label = f"Reviewer {seen[role]}" if role == "reviewer" else role.capitalize()
+        actors[participant["id"]] = (label, role)
+
     blocks = []
+    seen_paths = set()
+    index = 0
     for change in data["changes"]:
-        blocks.append(
-            f'<h3 class="mono">{_esc(change["path"])}</h3>'
-            f'<pre class="diff">{_esc(change["diff"])}</pre>'
-        )
+        path = change["path"]
+        seen_paths.add(path)
+        added, removed = _diff_stat(change["diff"])
+        comments = findings_by_path.get(path, [])
+        if comments:
+            comment_html = "".join(_finding_article(f, actors) for f in comments)
+        else:
+            comment_html = '<p class="empty">No review comments on this file.</p>'
+        blocks.append(_file_block(index, path, added, removed, len(comments),
+                                  _diff_block(change["diff"]), comment_html))
+        index += 1
+
+    # Never hide a comment: surface findings whose path has no diff entry.
+    for path in sorted(p for p in findings_by_path if p not in seen_paths):
+        comment_html = "".join(_finding_article(f, actors) for f in findings_by_path[path])
+        blocks.append(_file_block(index, path, None, None,
+                                  len(findings_by_path[path]), "", comment_html))
+        index += 1
+
     if not blocks:
-        return _section("Cumulative changes", '<p class="empty">No changes.</p>')
-    return _section("Cumulative changes", "".join(blocks))
+        return _section("Review threads & changes", '<p class="empty">No changes.</p>')
+    return _section("Review threads & changes", "".join(blocks))
 
 
 def _render_checks(data) -> str:
@@ -721,8 +926,7 @@ def render_html(data) -> str:
         _render_requirements(data),
         _render_participants(data),
         _render_timeline(data),
-        _render_findings(data),
-        _render_changes(data),
+        _render_files_changed(data),
         _render_checks(data),
         _render_approvals(data),
         "</main>",
@@ -803,9 +1007,9 @@ def write_report(task_dir) -> str:
     if data.get("task_id") != os.path.basename(real_dir):
         raise ValidationError("report task_id must match the task directory name")
     if data.get("status") == "READY_FOR_HUMAN":
-        config_path = os.path.join(real_dir, "config.resolved.json")
+        config_path = os.path.join(real_dir, "workflow.resolved.json")
         if os.path.islink(config_path) or not os.path.isfile(config_path):
-            raise ValidationError("READY requires frozen config.resolved.json")
+            raise ValidationError("READY requires frozen workflow.resolved.json")
         with open(config_path, encoding="utf-8") as handle:
             config = json.load(handle)
         import importlib.util

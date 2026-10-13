@@ -60,7 +60,7 @@ Do not truncate code silently; report binary files with hashes, size and explici
 
 `<python> <skill>/scripts/render_report.py --task-dir <project>/.agent-pr/tasks/<id>`
 
-For READY output, the helper requires config.resolved.json and compares the exact configured
+For READY output, the helper requires workflow.resolved.json and compares the exact configured
 reviewer IDs and required check IDs/argv to the report; omission cannot shrink the gate.
 It also applies require_distinct to available observed model labels. Controller must still
 verify provenance and compare live role identities against configuration, not self-claims.

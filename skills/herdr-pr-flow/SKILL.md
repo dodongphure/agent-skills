@@ -1,6 +1,6 @@
 ---
 name: herdr-pr-flow
-description: "Use when the user explicitly requests Herdr-backed coding orchestration, independent model reviews, or a local PR-style HTML report. Act as the controller in the first Herdr TUI tab, dispatch implementation and one or more reviewer tabs, and route sequential fixes and owner rechecks. Require approved workspace JSON before use. Do not use for ordinary single-agent edits, hidden subagent teams, real GitHub PR automation, or unattended commits."
+description: "Use when the user explicitly requests Herdr-backed coding orchestration, independent model reviews, or a local PR-style HTML report. Act as the controller in the first Herdr TUI tab, dispatch implementation and one or more reviewer tabs, and route sequential fixes and owner rechecks. Require an approved `.agent-pr/workflow.json` first; if it is absent, stop and ask the user to configure one. Do not use for ordinary single-agent edits, hidden subagent teams, real GitHub PR automation, or unattended commits."
 agent_created: true
 compatibility: "Herdr-managed interactive agent with terminal and file tools; native Windows or Linux/WSL. Optional bundled validation, snapshot and HTML helpers need Python 3.10+."
 ---
@@ -18,7 +18,7 @@ Read these references at the relevant step, not all on every task:
 - [Report format and completion gates](references/reporting.md)
 - [Installation and usage](references/usage.md)
 - [Evaluation and limitations](references/evaluation.md)
-- [Workspace JSON template](assets/workspace-config.example.json)
+- [Workflow config template](assets/workflow.example.json)
 - [Developer instructions](assets/developer-instructions.txt)
 - [Reviewer instructions](assets/reviewer-instructions.txt)
 
@@ -28,11 +28,13 @@ Identify the user's intended project root from caller cwd, project context and
 repository root. Ask if these disagree. Never infer the project from the currently
 focused Herdr sidebar item or scan unrelated home directories.
 
-Require `<project>/.agent-pr/config.json` (or an explicit user-specified path).
+Look for `<project>/.agent-pr/workflow.json`. It is not committed to the repository
+by default, but this workflow cannot run until it exists; an explicit user-specified
+path is also accepted and must be recorded.
 
-**If it does not exist, STOP and ask the user to configure it first.** Say:
+**If it is absent, STOP and ask the user to configure it first.** Say:
 
-> This workspace has no `.agent-pr/config.json`. Configure the controller,
+> This workspace has no `.agent-pr/workflow.json`. Configure the controller,
 > developer, at least one reviewer, and project checks before this workflow runs.
 > Shall I create a draft from the included template for you to review?
 
@@ -73,6 +75,11 @@ Read each actor's native session provenance from `herdr agent get <target>` (its
 `agent_session` field) and record it in state; a completed `agent prompt --wait` or
 `agent wait` also returns `completion_seq`, which identifies the finished turn.
 
+Before a new task reuses any retained tab, confirm that tab's interactive CLI is in a
+fresh session. If it still holds a previous task, reset it with that CLI's own `/new`
+command and wait until the agent reports `idle` before dispatching anything. See
+compatibility.md for the reset and state-monitoring commands.
+
 Distinguish planning from implementation authorization. A request to plan stays
 plan-only. Explicit "implement" can authorize the bounded approved task and real
 worker tabs. An independent reviewer is mandatory and must not be the controller.
@@ -82,7 +89,8 @@ Different CLIs alone do not prove different models; show requested vs observed I
 
 After configuration and task authorization gates, create a unique task directory:
 `<project>/.agent-pr/tasks/<task-id>/`. Keep all paths in the execution environment.
-Only one task/source writer may be active in a project at a time. Check the local
+Only one task/source writer may be active in a project at a time (this is the developer;
+reviewers are read-only and may run concurrently). Check the local
 active-task record and ask before adopting stale state; never delete evidence.
 
 Record the plan, requirements, allowed source paths, existing dirty/staged/untracked
@@ -90,7 +98,9 @@ state, approved verification commands, frozen config and permission limitations.
 Create `report.json`, `events.jsonl`, `state.json`, role outboxes and snapshot artifacts.
 Write an append-only event before dispatch, then update state and render HTML after
 accepted replies. Controller alone owns these canonical records; actors write only
-assigned result files. Do not fabricate messages, tests, model IDs or approvals.
+assigned result files. `events.jsonl` is the shared, append-only progress record that any
+tab may read for cross-tab coordination; only the controller appends to it.
+Do not fabricate messages, tests, model IDs or approvals.
 
 Capture the pre-task source baseline and each candidate with the snapshot helper
 or equivalent explicit file manifest and frozen copy. Include authorized source and
@@ -108,16 +118,25 @@ new workspaces or uncontrolled cross-Windows/WSL workers.
 Give the developer instructions, plan path, authorized files, task/request IDs,
 result outbox path and test contract. Developer alone edits authorized source.
 It must not spawn reviewers, mutate canonical report state or stage/commit/push/merge.
-Wait in bounded intervals, inspect liveness, and require its matching result artifact.
-A timeout is uncertain delivery; reconcile before any retry. Idle is not completion.
+If this task reuses a retained developer tab, reset it to a fresh session first
+(send `/new`, wait for `idle`) and record the reset event.
+Monitor progress with `herdr agent wait <target> --until idle --until done --until
+blocked --timeout <ms>` and a `herdr agent list` snapshot; wait in bounded intervals,
+inspect liveness, and require its matching result artifact. A timeout is uncertain
+delivery; reconcile before any retry. Idle is not completion.
 
 ## 5. Independent reviews
 
-Pause developer writes, freeze the candidate, and open one tab per configured reviewer.
+Pause developer writes, freeze the candidate, and open one tab per configured reviewer
+(reset any retained reviewer tab with `/new` and wait for `idle` before reusing it).
 Supply each the same requirements, baseline/candidate/diff and reviewer instructions,
 with an isolated review copy and separate writable outbox. Do not share peer findings
 until all independent initial reports arrive. Dispatch both before waiting when parallel
 execution is available; do not complete reviewer 1's full review before starting reviewer 2.
+Concurrent reviewers share no writable state: the candidate is frozen and read-only, each
+reviewer writes only its own outbox, and only the controller appends to events.jsonl,
+state.json and report.json. Keep the developer paused until every reviewer's report is
+collected, not merely the first.
 
 Validate replies by actor/task/request/snapshot IDs. All configured reviewers are
 required: one minimum is not a one-approval quorum. Unreachable, missing or unverifiable
@@ -169,6 +188,8 @@ tabs or delete task artifacts unless the user separately requests it.
 - A discovered skill description is not a fully preloaded controller; explicitly load
   this skill once in the first CLI session and reload after compaction if needed.
 - Never derive handles from tab numbers or a different client's focus.
+- A retained tab may still hold a previous task's session; reset it with the CLI's `/new`
+  and confirm `idle` before dispatch. Never assume a reused tab starts clean.
 - Native CLI TUI output can be truncated; task reply files and canonical events preserve
   evidence. Structured result files are part of this workflow contract, not transcript scraping.
 - Never mistake Herdr idle/done or an old visible "passed" line for a matching task result.

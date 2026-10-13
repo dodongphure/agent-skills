@@ -66,6 +66,39 @@ Prompt timeout/stall can happen AFTER delivery; inspect actor and matching outbo
 retry. Idle/done are ready-for-input signals, not proof checks passed. Match accepted reply
 by task, request, actor and snapshot. Keep original files and copied canonical evidence.
 
+## Fresh session and state monitoring
+
+A Herdr tab keeps its interactive CLI session across tasks, so a retained tab may still hold
+a previous task. Before reusing one, inspect it:
+
+```text
+herdr agent get <stored-target>                                       # state + agent_session
+herdr agent read <stored-target> --source recent-unwrapped --lines 40  # is an old task loaded?
+herdr agent list                                                      # every agent's state
+```
+
+If it still holds another task's session, reset it with that CLI's own new-session command
+(`/new`; some CLIs spell it `/clear`), then wait for it to settle:
+
+```text
+herdr agent prompt <stored-target> /new                 # no --wait: a reset produces no turn
+herdr agent wait <stored-target> --until idle --timeout <bounded-ms>
+```
+
+Confirm the reset with `agent get`/`read` (new `agent_session`, empty composer) and append a
+`reset` event before dispatching. Never type `/new` into a tab that is still `working`.
+
+Monitor completion with bounded waits; `--until` may be repeated for several states:
+
+```text
+herdr agent wait <stored-target> --until idle --until done --until blocked --timeout <bounded-ms>
+```
+
+States are idle, working, blocked, done, unknown. Without `--until`, a wait matches idle, done
+or blocked; without `--timeout` it waits indefinitely, so always pass a bounded timeout here.
+idle/done mean ready-for-input, NOT that checks passed — match the reply by task, request,
+actor, snapshot and `completion_seq`. Use `herdr agent explain` to diagnose a misdetected agent.
+
 ## Instruction delivery
 
 First tab loads this skill explicitly via native skill invocation or reads its absolute
