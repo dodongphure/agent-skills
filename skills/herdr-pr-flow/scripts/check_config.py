@@ -4,7 +4,12 @@
 Checks ``<project>/.agent-pr/workflow.json``. The file is not committed to the
 repository by default, but the workflow cannot run without it: an absent file
 returns CONFIG_REQUIRED so the caller stops and asks the user to configure.
-Structural validation only."""
+Structural validation only.
+
+Two schema versions are accepted. v1 is the original shape and is implicitly a
+static report. v2 adds a required ``report`` section (``mode`` + ``port``) that
+selects the interactive feedback mode. Unknown versions and unknown keys fail,
+so a v1-only executable rejects a v2 file loudly rather than ignoring it."""
 from __future__ import annotations
 import argparse
 import json
@@ -14,6 +19,15 @@ import sys
 
 class ConfigError(ValueError):
     pass
+
+
+# Supported configuration schema versions. v1 is the original shape and means a
+# purely static report; v2 adds a required ``report`` section that selects the
+# interactive feedback mode and its loopback port.
+SCHEMA_VERSIONS = (1, 2)
+REPORT_MODES = ("static", "offline-feedback", "live")
+MIN_PORT = 1024
+MAX_PORT = 65535
 
 
 def keys(value, required, label):
@@ -54,9 +68,15 @@ def arguments(value, label, extra=False):
 
 
 def validate_config(data):
-    keys(data, ("schema_version", "roles", "workflow", "verification", "safety"), "config")
-    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
-        raise ConfigError("schema_version must be 1")
+    if not isinstance(data, dict):
+        raise ConfigError("config must be a JSON object")
+    version = data.get("schema_version")
+    if type(version) is not int or version not in SCHEMA_VERSIONS:
+        raise ConfigError(f"schema_version must be one of {SCHEMA_VERSIONS}")
+    required = ["schema_version", "roles", "workflow", "verification", "safety"]
+    if version == 2:
+        required.append("report")
+    keys(data, required, "config")
     roles = data["roles"]
     keys(roles, ("controller", "developer", "reviewers"), "roles")
     reviewers = roles["reviewers"]
@@ -106,7 +126,31 @@ def validate_config(data):
     keys(data["safety"], ("allow_stage", "allow_commit", "allow_push", "allow_merge"), "safety")
     if any(value is not False for value in data["safety"].values()):
         raise ConfigError("all git mutation flags must be exactly false")
+    if version == 2:
+        validate_report_section(data["report"])
     return data
+
+
+def validate_report_section(report):
+    """Validate the v2 ``report`` policy: an exact mode + loopback port pair."""
+    keys(report, ("mode", "port"), "report")
+    if report["mode"] not in REPORT_MODES:
+        raise ConfigError(f"report.mode must be one of {REPORT_MODES}")
+    if type(report["port"]) is not int or not (MIN_PORT <= report["port"] <= MAX_PORT):
+        raise ConfigError(f"report.port must be an integer in {MIN_PORT}-{MAX_PORT}")
+
+
+def report_policy(data):
+    """Normalized report policy for any supported config version.
+
+    v1 configs are implicitly static; v2 carries an explicit ``report`` section.
+    The renderer and the loopback server both resolve the mode through here so a
+    CLI flag can never silently override the frozen policy.
+    """
+    if isinstance(data, dict) and data.get("schema_version") == 2:
+        report = data.get("report") or {}
+        return {"mode": report.get("mode", "static"), "port": report.get("port")}
+    return {"mode": "static", "port": None}
 
 
 def load_config(workspace, config=None):
@@ -122,7 +166,7 @@ def load_config(workspace, config=None):
         return {"status": "CONFIG_REQUIRED", "path": str(path), "message": "No .agent-pr/workflow.json. Ask the user to configure this workspace before dispatching or editing code."}, 3
     if path.stat().st_size > 1024 * 1024:
         raise ConfigError("configuration exceeds 1 MiB")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     validate_config(data)
     return {"status": "CONFIG_VALID", "path": str(path), "reviewers": len(data["roles"]["reviewers"]), "message": "Structure valid; still require user approval, CLI/auth/permissions and model provenance checks."}, 0
 

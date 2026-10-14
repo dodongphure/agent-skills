@@ -29,3 +29,6 @@ desktop.ini
 .env.*
 
 outputs/
+
+# Agent workspace
+.agent-pr/

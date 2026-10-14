@@ -173,6 +173,59 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("+line 0", out)
         self.assertIn("+line 399", out)  # last line survives in full
 
+    def test_prose_blocks_wrap_instead_of_scrolling(self):
+        """The plan and check output must wrap, not get a horizontal scroller."""
+        data = make_report()
+        data["plan"] = "Step 1: " + ("a deliberately long plan line " * 30) + "\nStep 2: done."
+        data["checks"][0]["output"] = "a single very long output line " * 12
+        out = render_html(data)
+        self.assertIn('<pre class="plan">', out)
+        self.assertIn('<pre class="out">', out)
+        self.assertIn("Step 2: done.", out)  # newlines survive the escaping
+        rule = out[out.index("pre.plan, pre.out {"): out.index("pre.plan, pre.out {") + 160]
+        self.assertIn("white-space: pre-wrap", rule)
+        self.assertIn("overflow-x: visible", rule)
+        # The shared rule still scrolls, so diffs keep their line alignment.
+        self.assertIn("white-space: pre;", out)
+
+    def test_timeline_entries_are_tone_classified(self):
+        out = render_html(make_report())
+        # The rail item and its kind chip share one tone, so they can never drift.
+        self.assertIn('<li class="tl-item tl-yellow">', out)
+        self.assertIn('<li class="tl-item tl-accent">', out)
+        self.assertIn('<span class="kind k-yellow">plan</span>', out)
+        self.assertIn('<span class="kind k-accent">review</span>', out)
+        self.assertIn(".tl-item::before", out)  # the rail/dot rule ships
+
+    def test_timeline_uses_role_badges_not_raw_ids(self):
+        out = render_html(make_report())
+        start = out.index("<h2>Conversation timeline</h2>")
+        section = out[start:start + 2000]
+        self.assertIn('<span class="badge role-controller">Controller</span>', section)
+        self.assertIn('<span class="badge role-reviewer">Reviewer 1</span>', section)
+        self.assertNotIn('class="mono">ctrl<', section)
+
+    def test_unknown_timeline_kind_is_still_shown(self):
+        data = make_report()
+        data["timeline"][0]["kind"] = "teleported"
+        out = render_html(data)
+        self.assertIn('<li class="tl-item tl-muted">', out)
+        self.assertIn('<span class="kind k-muted">teleported</span>', out)
+
+    def test_kind_tone_table_covers_the_documented_kinds(self):
+        cases = {
+            "snapshot": "accent", "review": "accent", "dispatch": "purple",
+            "plan": "yellow", "implement": "yellow", "fix": "yellow",
+            "verification": "green", "approved": "green",
+            "blocked": "red", "error": "red",
+            "comment": "muted", "check": "muted", "teleported": "muted",
+        }
+        for kind, tone in cases.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(render_report._kind_tone(kind), tone)
+        # Unknown actors fall back to the raw id rather than a wrong badge.
+        self.assertIn("ghost", render_report._actor_html({}, "ghost"))
+
     def test_xss_payloads_are_escaped(self):
         data = make_report()
         data["title"] = '<script>alert("xss")</script>'

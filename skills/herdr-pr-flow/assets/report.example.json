@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "feedback": {"revision": 0, "current_view_id": "", "views": [], "threads": [], "comments": [], "decisions": [], "receipts": []},
   "task_id": "mock-demo",
   "title": "MOCK ONLY - Local Herdr review report",
   "status": "BLOCKED",

@@ -7,11 +7,24 @@ After valid config and authorized task scope, use `.agent-pr/tasks/<unique-task-
 - report.json (canonical display projection), report.html (single portable output)
 - events.jsonl (append-only accepted actions), state.json (current stage and pending requests)
 - outbox/<actor>/<request-id>.json, snapshots/<label>/manifest.json and source/
-- evidence/ (test output and per-change diff), permission notes
+- views/<view-id>.json (immutable anchor + thread manifest; interactive modes — see retention below)
+- inbox/human/<batch-id>.json (controller-preserved raw human submission)
+- evidence/ (test output and permission notes); the diff text lives in report.json, not as files
 
 Check `.agent-pr/active-task.json` before source changes; only one controller task in the
 project. Do not blindly remove a stale record. Ask whether to resume/adopt; cross-process
 locking is not guaranteed by instructions. v1 is NOT safe for concurrent controllers.
+
+**View manifest retention.** `views/` is content-addressed by `view_id`, so every render of a
+changed report adds a new `views/<view-id>.json` and the previous manifests stay on disk. This
+is deliberate: an exported feedback envelope names the view it was authored against, and a
+**stale** (not current) submission must still resolve and import as stale rather than fail as
+an unknown view. The directory is therefore **immutable and appended to, one manifest per
+distinct view, with no automatic pruning** — it is not a single "current view" file, and it
+grows with the number of distinct rendered views in a task. Treat it as task evidence, like
+`snapshots/`: clean it up only when the whole task directory is retired, never mid-task. The
+current view is whichever `view_id` the freshly written manifest carries; staleness is decided
+by comparing an envelope's view against that, not by deleting older files.
 
 State has task ID, phase, config hash, Herdr caller/server IDs, actor handles/native session
 provenance (from `agent get`'s `agent_session`), baseline/current snapshot, open findings,
@@ -60,8 +73,12 @@ a scoped helper cannot detect unknown unlisted files. Any new path must be appro
 baseline absence/content recorded before inclusion. Pause for out-of-scope changes.
 
 Generate cumulative task diff baseline→candidate and fix delta previous→candidate using
-standard file/diff tools or safe code. Include new/deleted content and full text diffs. Do not
-use HEAD alone. Binary contents need explicit human-visible summary, hashes and omissions.
+standard file/diff tools or safe code. Capture the diff TEXT into report.json
+(`changes[].diff`), one entry per path — that file is the single canonical home for diffs; do
+not scatter one .diff file per path across the task dir. If a tool needs a temp file, write it
+outside the task dir (or delete it after reading). Include new/deleted content and full text
+diffs. Do not use HEAD alone. Binary contents need explicit human-visible summary, hashes and
+omissions.
 At handoff verify the live scope using `snapshot.py --workspace <project> --verify <manifest>`;
 confirm it matches and check out-of-scope/index changes separately. Helper hashes are not a
 filesystem sandbox; verify reviewer copies were not changed when collecting their evidence.
@@ -102,6 +119,45 @@ Apply max_fix_attempts_per_finding and wall-clock task budget. Block with unreso
 failed checks or unavailable actor visibly rendered; ask user before scope/model/budget changes.
 No automatic dismissal or code commit at the limit. Default low-severity findings remain open
 until verified or explicitly deferred by the user; deferral must be visible and is not strict READY.
+
+## Human handoff
+
+Report the report path, a source-change/check summary, and ONE suggested commit message.
+Format: a single line, <=72 characters, imperative, matching the repository's existing
+commit style (read its recent commit subjects, read-only, to pick the convention). Base it
+only on the recorded requirements and the final accepted diff — do not invent scope, do not
+bundle unrelated work, and do not claim tests or behaviour the evidence does not show. Offer
+it for the user to edit. A suggested message is not authorization to commit: the controller
+never runs `git add/commit/push/merge` and never creates a real PR.
+
+## Human feedback intake (config v2 interactive modes)
+
+When the frozen policy is `offline-feedback` or `live`, handoff is not the end of the task:
+
+1. **Render interactively** and, in `live` mode, start the bundled helper on the configured
+   fixed port. Give the user the loopback URL. Say plainly that submitting does **not** wake
+   the controller and does **not** mean "imported".
+2. **Intake.** For an offline export, the user supplies the path (or pastes the JSON). Run
+   `feedback.py --task-dir <task> --input <path>`; it validates the envelope against the
+   originating view manifest and reports staleness. Then preserve the raw input under
+   `inbox/human/` (`--stage`) and append one `human_feedback_received` event.
+3. **Triage each comment** and record a disposition — never silently drop one:
+   - `recorded` — a question, acknowledgement or non-code discussion, with an answer.
+   - `fix_required` — a possible correctness/security/behaviour/quality defect. Link a
+     **reviewer-owned** finding; the human's origin stays in `source_comment_ids`.
+   - `needs_clarification` — uncertainty is not dismissal; ask.
+   Preserve prior decisions rather than overwriting the explanation.
+4. **Fix loop.** A reply challenging an existing finding reopens it. Dispatch one finding at a
+   time to the existing developer, then the owner verifies that exact snapshot. Attempt and
+   time budgets are cumulative across reopenings — a reply does not reset them. At the limit,
+   render BLOCKED and ask; never mint a fresh finding to grant silent extra attempts.
+5. **Re-render** the same task-local `report.html`, including the original comments, every
+   decision and any outdated anchors. Comment-only decisions create no new source snapshot and
+   do not invalidate valid evidence; source changes do.
+
+**READY v2:** every accepted human comment needs a terminal decision (see reporting.md).
+Human comments are never an approval or a commit authorization. An offline controller cannot
+see drafts or exported-but-unimported files; do not imply otherwise.
 
 ## Permission boundary
 
