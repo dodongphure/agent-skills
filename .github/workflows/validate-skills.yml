@@ -46,3 +46,10 @@ jobs:
 
           echo "validated $found skill(s)"
           exit "$status"
+
+      # The structural validator only checks layout and frontmatter; the skill's
+      # actual contract (renderer, feedback envelope, view manifests) lives in
+      # its unit tests. Running them here is what stops a regression reaching
+      # main - without it, a green CI said nothing about whether the code ran.
+      - name: Run herdr-pr-flow unit tests
+        run: python -m unittest discover -s skills/herdr-pr-flow/tests -v

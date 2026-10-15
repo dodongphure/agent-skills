@@ -32,6 +32,20 @@
   var BATCH_ID = uuid();
   var LIVE = MODE === "live";
 
+  // `batch_id` names one immutable submission, not one page load. The controller
+  // stages each batch at `inbox/human/<batch-id>.json` and refuses to overwrite
+  // it with different bytes, so a batch id that survives an edit makes the
+  // *second* submission of a session collide with the first:
+  // "a different submission already uses this batch_id" (HTTP 422). The same
+  // trap sits under the comment id - the server keys accepted comments by id and
+  // rejects a re-used id whose content changed. Both are therefore rotated the
+  // moment a draft changes, and deliberately NOT on a pure retry: resending an
+  // unchanged batch must stay byte-identical so `stage_envelope` treats it as a
+  // no-op instead of a conflict.
+  function rotateBatchId() {
+    BATCH_ID = uuid();
+  }
+
   var drafts = [];
 
   function all(selector) {
@@ -205,6 +219,9 @@
     drafts = drafts.filter(function (item) {
       return targetKey(item.target) !== key;
     });
+    // A removal is a content change: the batch this draft belonged to is now
+    // different, so it needs a fresh id before it can be submitted again.
+    rotateBatchId();
     save();
     refresh();
   }
@@ -212,9 +229,18 @@
   function putDraft(target, body) {
     var existing = draftFor(target);
     if (existing) {
-      existing.body = body;
+      if (existing.body !== body) {
+        // The server fingerprints a comment by id, so editing the text must mint
+        // a new id. Re-using it made an edited comment read as "already accepted
+        // with different content (conflict)" - even after a reload, because the
+        // id was persisted with the draft.
+        existing.id = uuid();
+        existing.body = body;
+        rotateBatchId();
+      }
     } else {
       drafts.push({ id: uuid(), target: target, body: body });
+      rotateBatchId();
     }
     save();
     refresh();

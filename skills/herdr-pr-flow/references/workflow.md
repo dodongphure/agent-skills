@@ -26,11 +26,20 @@ grows with the number of distinct rendered views in a task. Treat it as task evi
 current view is whichever `view_id` the freshly written manifest carries; staleness is decided
 by comparing an envelope's view against that, not by deleting older files.
 
+`feedback.current_view_id` in `report.json` is a **cache of the last imported projection**, not
+the source of truth: the renderer writes `views/<view-id>.json` and stamps the page without
+rewriting `report.json`, so on the initial handoff the cache is still `""` while the page is
+current. `feedback.py` therefore falls back to recomputing the projection from the report when
+the cache is empty — reading the cache alone reported every fresh report as stale.
+
 State has task ID, phase, config hash, Herdr caller/server IDs, actor handles/native session
 provenance (from `agent get`'s `agent_session`), baseline/current snapshot, open findings,
 per-finding attempt counts, outstanding request IDs and last accepted event sequence. Event envelope has sequence, UTC timestamp,
 task ID, actor, kind, request ID, snapshot ID and payload. Obtain time from OS/API, not mental
-arithmetic. Persist event before dispatch and receipt before next action. Ignore duplicate
+arithmetic. **The timestamp must be true UTC** — never stamp local wall-clock with a `Z`
+suffix. The report renders each `ts` in the reader's own clock, so a local value labelled UTC
+shows up offset by the machine's zone (2026-10-15: 11:35 local written as `11:35Z` rendered as
+19:35). Persist event before dispatch and receipt before next action. Ignore duplicate
 receipts only if identical; mismatched duplicate IDs block and preserve both for inspection.
 
 ## Cross-tab events and live state
@@ -47,6 +56,15 @@ A tab's CLI session is separate from Herdr's agent state, so track both:
 - Herdr agent state (`herdr agent get`, `herdr agent list`, `herdr agent wait --until ...`)
   reports idle/working/blocked/done/unknown — a liveness signal only.
 - `events.jsonl` plus the actor's result file say WHAT actually happened for this task.
+
+`report.json`'s `timeline` is a *summary* of this log, in the same order, and it may omit
+events — dispatch and session resets are coordination, not narrative. So a timeline entry
+carries an optional `event_seq` naming the event it summarises: **stamp it for every entry
+whose action has an event.** Without it the renderer falls back to joining the two lists by
+position, and one interleaved event the timeline skipped shifts every later row onto its
+neighbour's clock — silently, because the rows still render. An entry with no matching event
+stays unstamped and renders with no time at all; that is the honest outcome, not a gap to
+paper over.
 
 Before a new task reuses a retained tab, verify the tab's CLI is in a fresh session; if it
 still holds a previous task, send that CLI's `/new` command and wait for `idle`. Append a

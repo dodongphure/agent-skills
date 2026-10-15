@@ -1,0 +1,19 @@
+# Normalise line endings in the repository, independent of each machine's
+# core.autocrlf. The repo tooling is Bash + Python and the skills are installed
+# on Linux/macOS as well as Windows, so LF is the canonical form everywhere.
+# Without this, a Windows checkout with core.autocrlf=true rewrites files to
+# CRLF and every subsequent diff shows whole-file churn.
+
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

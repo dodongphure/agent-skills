@@ -490,9 +490,11 @@ class PageTabTests(unittest.TestCase):
         files = out[out.index('data-panel="files"'):]
         # Conversation: the review log, no diffs.
         for heading in ("Requirements &amp; plan", "Participants",
-                        "Conversation timeline", "Human feedback",
-                        "Checks", "Approvals"):
+                        "Conversation timeline", "Checks", "Approvals"):
             self.assertIn(heading, conv)
+        # Imported human comments are rows in that same log, not a section of
+        # their own, so there is one chronological record per task.
+        self.assertNotIn("Human feedback", conv)
         self.assertNotIn("diffview", conv)
         # Files changed: the diffs, and none of the log tables.
         self.assertIn("diffview", files)
@@ -689,6 +691,78 @@ class ReportV2Tests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_report(data)
 
+    def test_v2_feedback_rejects_an_arbitrary_extra_key(self):
+        """An extra top-level key must fail, not ride along silently.
+
+        `_require_keys` only checks containment, so a misspelled or
+        half-migrated field (`current_view` for `current_view_id`) used to pass
+        validation and then read back as `None` at the point of use. The set of
+        allowed keys is exact.
+        """
+        for extra in ("current_view", "revisions", "extra", "Feedback"):
+            with self.subTest(extra=extra):
+                data = with_hunk()
+                data["schema_version"] = 2
+                data["feedback"] = {
+                    "revision": 0, "current_view_id": "", "views": [], "threads": [],
+                    "comments": [], "decisions": [], "receipts": [],
+                }
+                data["feedback"][extra] = "surprise"
+                with self.assertRaises(ValidationError) as ctx:
+                    validate_report(data)
+                self.assertIn(extra, str(ctx.exception))
+
+    def test_decision_controller_must_have_the_controller_role(self):
+        """A known participant id is not enough - the role must be 'controller'.
+
+        Membership-only validation let a reviewer or developer id record a
+        disposition, which the READY gate then counted as a real controller
+        decision.
+        """
+        # `rev1` and `dev` are real participants but not the controller.
+        for impostor in ("rev1", "dev"):
+            with self.subTest(controller=impostor):
+                data = self._v2()
+                data["feedback"]["decisions"][0]["controller"] = impostor
+                with self.assertRaises(ValidationError) as ctx:
+                    validate_report(data)
+                self.assertIn("role 'controller'", str(ctx.exception))
+        # The genuine controller still validates.
+        validate_report(self._v2())
+
+    def test_v2_finding_optional_provenance_is_type_checked(self):
+        """`anchor` and `source_comment_ids` are optional but must be well-typed."""
+        # Absent is fine - v1 findings carry neither.
+        data = self._v2()
+        validate_report(data)
+
+        # A null anchor is the documented migrated-v1 shape.
+        data = self._v2()
+        data["findings"][0]["anchor"] = None
+        data["findings"][0]["source_comment_ids"] = []
+        validate_report(data)
+
+        # A well-formed typed anchor and source list are accepted.
+        data = self._v2()
+        data["findings"][0]["anchor"] = {"kind": "file", "file_id": "file-abc"}
+        data["findings"][0]["source_comment_ids"] = ["c1"]
+        validate_report(data)
+
+        for bad_anchor in ("line-1", 7, {"kind": "line"}, {"kind": "nope", "file_id": "x"},
+                           {"kind": "line", "anchor_id": ""}, []):
+            with self.subTest(anchor=bad_anchor):
+                broken = self._v2()
+                broken["findings"][0]["anchor"] = bad_anchor
+                with self.assertRaises(ValidationError):
+                    validate_report(broken)
+
+        for bad_sources in ("c1", ["", "c1"], ["c1", "c1"], [1]):
+            with self.subTest(source_comment_ids=bad_sources):
+                broken = self._v2()
+                broken["findings"][0]["source_comment_ids"] = bad_sources
+                with self.assertRaises(ValidationError):
+                    validate_report(broken)
+
     def test_bundled_example_is_a_valid_v2_report(self):
         """The shipped example must demonstrate the interactive shape verbatim."""
         example = json.loads(
@@ -702,11 +776,17 @@ class ReportV2Tests(unittest.TestCase):
     def test_v1_report_still_valid(self):
         validate_report(test_renderer.make_report())
 
-    def test_v2_renders_human_feedback(self):
+    def test_v2_renders_the_human_comment_as_a_timeline_row(self):
+        """Imported comments live in the Conversation timeline, not a section."""
         out = render_html(self._v2(), mode="offline-feedback")
-        self.assertIn("Human feedback", out)
+        self.assertNotIn("Human feedback", out)
         self.assertIn("Human (imported)", out)
         self.assertIn("fd-recorded", out)
+        # The row is inside the Conversation timeline list, and carries the jump
+        # id the Files panel's rail links to.
+        timeline = out[out.index("Conversation timeline"):out.index("Checks")]
+        self.assertIn("Human (imported)", timeline)
+        self.assertIn('id="fb-human-t1"', timeline)
 
     def test_pending_comment_blocks_ready(self):
         data = self._v2()
@@ -1157,6 +1237,42 @@ class DraftCardAssetTests(unittest.TestCase):
         self.assertNotIn("token()", tracker)
         self.assertNotIn("markDirty()", tracker)
 
+    def test_a_pure_retry_reuses_the_batch_id(self):
+        """Resubmitting an unedited batch must stay byte-identical.
+
+        The rotation is deliberately confined to `putDraft`/`removeDraft`. If a
+        retry minted a new batch id, the controller would stage a *second* inbox
+        file for the same comments instead of recognising a no-op retry.
+        """
+        self.assertIn("function rotateBatchId()", self.js)
+        self.assertIn("BATCH_ID = uuid();", self.js)
+        put_draft = self.js[self.js.index("function putDraft("):]
+        put_draft = put_draft[:put_draft.index("function el(")]
+        remove_draft = self.js[self.js.index("function removeDraft("):]
+        remove_draft = remove_draft[:remove_draft.index("function putDraft(")]
+        # Rotation happens on mutation...
+        self.assertIn("rotateBatchId();", put_draft)
+        self.assertIn("rotateBatchId();", remove_draft)
+        # ...and nowhere else: submit/download/copy must resend the same id.
+        self.assertNotIn("rotateBatchId", self.js[self.js.index("function payload()"):])
+
+    def test_editing_a_comment_body_mints_a_new_comment_id(self):
+        """The server keys an accepted comment by id, so a body edit needs a new id.
+
+        Regression: `putDraft` overwrote `existing.body` in place, so the id
+        stayed put and the resubmission read as "already accepted with different
+        content (conflict)" - even after a reload, since the id was saved with
+        the draft.
+        """
+        put_draft = self.js[self.js.index("function putDraft("):]
+        put_draft = put_draft[:put_draft.index("function el(")]
+        self.assertIn("if (existing.body !== body) {", put_draft)
+        self.assertIn("existing.id = uuid();", put_draft)
+        # The identity change is conditional, so saving the same text twice is
+        # still the same batch and the same comment.
+        guard = put_draft[put_draft.index("if (existing.body !== body) {"):]
+        self.assertIn("existing.body = body;", guard)
+
     def test_handed_off_drafts_are_still_fingerprinted(self):
         """The handoff fingerprint records *which* drafts left, not just how many.
 
@@ -1241,6 +1357,47 @@ class DraftCardAssetTests(unittest.TestCase):
             self.assertIn(var, out)
 
 
+class StaticTemplateContractTests(unittest.TestCase):
+    """`assets/report-template.html` must obey the same rules it documents.
+
+    references/reporting.md calls the hand-written static template a last resort
+    and holds it to the 14px floor and the renderer's body metrics. The template
+    had drifted to `15px/1.6` inside a 960px column while the doc still claimed
+    the rules held - a hand-written page that looks materially different from a
+    rendered one is the failure mode the rule exists to prevent.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "assets", "report-template.html",
+        )
+        with open(path, encoding="utf-8") as handle:
+            cls.html = handle.read()
+
+    def test_body_metrics_match_the_renderer(self):
+        self.assertIn("font:16px/1.55", self.html.replace(" ", ""))
+
+    def test_body_column_matches_the_renderer(self):
+        self.assertIn("max-width:1200px", self.html.replace(" ", ""))
+
+    def test_no_font_size_falls_below_the_14px_floor(self):
+        import re as _re
+        sizes = [float(v) for v in _re.findall(r"font-size:\s*([\d.]+)px", self.html)]
+        # The shorthand `font:16px/1.55` is the body; anything declared with
+        # font-size must clear the floor.
+        self.assertTrue(sizes, "the template must declare its small-text size")
+        for size in sizes:
+            self.assertGreaterEqual(size, 14, f"font-size {size}px is below the floor")
+
+    def test_template_stays_script_free(self):
+        # It is the static last resort: no script, no remote asset, ever.
+        self.assertNotIn("<script", self.html)
+        self.assertNotIn("http://", self.html)
+        self.assertNotIn("https://", self.html)
+
+
 class ViewManifestRetentionTests(unittest.TestCase):
     """`views/` is immutable and appended to: one manifest per distinct view.
 
@@ -1301,6 +1458,180 @@ class ViewManifestRetentionTests(unittest.TestCase):
         import feedback as feedback_module  # noqa: E402  (test-local import)
         manifest = feedback_module.load_manifest(task_dir, old_view)
         self.assertEqual(manifest["view_id"], old_view)
+
+
+def file_feedback_block(file_id, body="explain why need this?",
+                        rationale="Because LF is canonical."):
+    """A v2 feedback block whose thread targets a whole file, not a line."""
+    block = feedback_block("anchor-unused")
+    target = {"kind": "file", "file_id": file_id}
+    block["threads"][0]["target"] = dict(target)
+    block["threads"][0]["status"] = "recorded"
+    block["comments"][0]["target"] = dict(target)
+    block["comments"][0]["body"] = body
+    block["decisions"][0]["rationale"] = rationale
+    return block
+
+
+class ImportedHumanCommentTests(unittest.TestCase):
+    """An imported comment must stay visible where the reviewer wrote it.
+
+    Regression (2026-10-15, review-20261015-001): the reviewer left a comment
+    from the Files panel (``report.html#file-0``), the controller imported the
+    batch and re-rendered, and reloading the page showed no reply. The comment
+    and the controller's rationale existed *only* in the Conversation tab's
+    Human feedback section, which a ``#file-0`` deep link never reveals, and the
+    draft card that had shown the text before the export was cleared from
+    localStorage -- so the file looked as if the comment had never been made.
+    """
+
+    def _report(self):
+        data = with_hunk()
+        view = render_report._build_view(data, interactive=True)
+        view_id = view["manifest"]["view_id"]
+        data["schema_version"] = 2
+        block = file_feedback_block(view["files"]["src/widget.py"])
+        block["current_view_id"] = view_id
+        block["views"] = [{"id": view_id, "digest": HEXLESS}]
+        block["comments"][0]["origin_view_id"] = view_id
+        data["feedback"] = block
+        return data
+
+    def _files_panel(self, out):
+        """The Files panel's markup, with every <style>/<script> block removed."""
+        body = re.sub(r"<style>.*?</style>", "", out, flags=re.DOTALL)
+        body = re.sub(r"<script>.*?</script>", "", body, flags=re.DOTALL)
+        return body[body.index('data-panel="files"'):]
+
+    def test_the_reply_is_badged_next_to_the_file_it_answers(self):
+        files = self._files_panel(render_html(self._report(), mode="offline-feedback"))
+        self.assertIn("Human (imported)", files)
+        self.assertIn("explain why need this?", files)
+        # The controller's answer is badged like every other speaker in the
+        # report, not plain prose prefixed with "Controller: ".
+        self.assertIn('<span class="badge role-controller">Controller</span>', files)
+        self.assertIn("Because LF is canonical.", files)
+
+    def test_the_comment_clock_is_shown_in_local_time(self):
+        """A raw `…Z` in the header is exactly what the reader had to convert."""
+        files = self._files_panel(render_html(self._report(), mode="offline-feedback"))
+        self.assertIn('<time class="tl-when" datetime="2026-10-13T11:00:00Z">', files)
+        # The bare UTC string must not survive as visible text anywhere.
+        self.assertNotIn(">2026-10-13T11:00:00Z<", files)
+
+    def test_the_conversation_copy_is_the_single_jump_target(self):
+        out = render_html(self._report(), mode="offline-feedback")
+        body = re.sub(r"<style>.*?</style>", "", out, flags=re.DOTALL)
+        # The id exists exactly once (the Conversation copy), and the Files
+        # panel's rail links to it -- duplicate ids are invalid HTML.
+        self.assertEqual(body.count('id="fb-human-t1"'), 1)
+        self.assertIn('href="#fb-human-t1"', self._files_panel(out))
+
+    def test_the_file_row_advertises_the_imported_comment(self):
+        files = self._files_panel(render_html(self._report(), mode="offline-feedback"))
+        # The fixture already carries one review finding, so the imported
+        # comment takes the row (and the rail badge) from 1 to 2.
+        self.assertIn('title="2 comments"', files)
+        self.assertIn('class="has-cmt"', files)
+
+    def test_static_mode_renders_it_too_and_stays_script_free(self):
+        out = render_html(self._report())
+        self.assertNotIn("<script", out)
+        files = self._files_panel(out)
+        self.assertIn("Because LF is canonical.", files)
+        # The reply is server-rendered markup, so static mode must carry the
+        # badge itself -- the styling lives in the always-emitted base CSS.
+        self.assertIn('<span class="badge role-controller">Controller</span>', files)
+
+    def test_a_file_target_is_named_by_path_not_by_its_id(self):
+        data = self._report()
+        view = render_report._build_view(data, interactive=True)
+        label = render_report._target_label(
+            {"kind": "file", "file_id": view["files"]["src/widget.py"]}, data, view
+        )
+        self.assertEqual(label, "src/widget.py")
+
+    def test_a_line_target_is_named_by_path_and_line(self):
+        data = with_hunk()
+        view = render_report._build_view(data, interactive=True)
+        anchor_id = view["lines"][("src/widget.py", "new", 2)]
+        label = render_report._target_label(
+            {"kind": "line", "anchor_id": anchor_id}, data, view
+        )
+        self.assertEqual(label, "src/widget.py:2")
+
+    def test_an_unresolvable_target_keeps_the_tagged_id(self):
+        """A stale anchor must stay visibly unidentified, not be dressed up."""
+        data = self._report()
+        view = render_report._build_view(data, interactive=True)
+        label = render_report._target_label(
+            {"kind": "file", "file_id": "file-" + "0" * 64}, data, view
+        )
+        self.assertEqual(label, "file " + "file-" + "0" * 64)
+
+
+class TimelineJoinTests(unittest.TestCase):
+    """A timeline row must never borrow a neighbouring row's clock."""
+
+    def _report(self):
+        return test_renderer.make_report()
+
+    def test_event_seq_wins_over_position(self):
+        data = self._report()
+        data["timeline"][2]["event_seq"] = 5
+        events = [
+            {"seq": 1, "ts": "2026-10-15T03:35:00Z"},
+            {"seq": 2, "ts": "2026-10-15T03:36:00Z"},
+            {"seq": 3, "ts": "2026-10-15T03:37:00Z"},
+            {"seq": 4, "ts": "2026-10-15T04:02:56Z"},
+            {"seq": 5, "ts": "2026-10-15T04:05:00Z"},
+        ]
+        out = render_html(data, events=events)
+        self.assertIn('datetime="2026-10-15T04:05:00Z"', out)
+        self.assertNotIn('datetime="2026-10-15T03:37:00Z"', out)
+
+    def test_an_unresolvable_event_seq_shows_no_time_rather_than_a_guess(self):
+        data = self._report()
+        data["timeline"][0]["event_seq"] = 1
+        data["timeline"][1]["event_seq"] = 99  # no such event
+        events = [
+            {"seq": 1, "ts": "2026-10-15T03:35:00Z"},
+            {"seq": 2, "ts": "2026-10-15T03:36:00Z"},
+            {"seq": 3, "ts": "2026-10-15T03:37:00Z"},
+            {"seq": 4, "ts": "2026-10-15T03:38:00Z"},
+        ]
+        out = render_html(data, events=events)
+        self.assertEqual(out.count('class="tl-when"'), 1)
+        self.assertIn('datetime="2026-10-15T03:35:00Z"', out)
+        # Entry 1's seq resolves to nothing, and entry 2 carries no seq while the
+        # log is longer than the timeline -- neither may take a positional time.
+        self.assertNotIn('datetime="2026-10-15T03:36:00Z"', out)
+        self.assertNotIn('datetime="2026-10-15T03:37:00Z"', out)
+
+    def test_a_log_longer_than_the_timeline_times_nothing_by_position(self):
+        """9 events against 8 entries is exactly the shape that mislabelled rows.
+
+        A longer log proves the timeline omits events but says nothing about
+        where, so position stops being a join key: every unstamped entry shows
+        no time instead of its neighbour's clock.
+        """
+        data = self._report()
+        events = [
+            {"seq": n, "ts": "2026-10-15T0%d:00:00Z" % (n % 10)}
+            for n in range(1, len(data["timeline"]) + 2)
+        ]
+        self.assertGreater(len(events), len(data["timeline"]))
+        out = render_html(data, events=events)
+        # `.tl-when` is also a CSS class name, so match the attribute, not the bare token.
+        self.assertNotIn('class="tl-when"', out)
+
+    def test_a_non_integer_event_seq_is_rejected(self):
+        for bad in ("3", 3.5, True, []):
+            with self.subTest(bad=bad):
+                data = self._report()
+                data["timeline"][0]["event_seq"] = bad
+                with self.assertRaises(ValidationError):
+                    validate_report(data)
 
 
 if __name__ == "__main__":

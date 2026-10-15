@@ -174,6 +174,22 @@ def _require_keys(obj: dict, keys, where: str) -> None:
             _fail(f"{where}: missing required key {key!r}")
 
 
+def _reject_extra_keys(obj: dict, keys, where: str) -> None:
+    """Fail on any key not in ``keys``.
+
+    A missing-key check alone silently accepts arbitrary extras, so a typo
+    (``current_view`` for ``current_view_id``) or a half-migrated field rides
+    along unnoticed until something downstream reads it and gets ``None``.
+    """
+    allowed = set(keys)
+    extra = sorted(set(obj) - allowed)
+    if extra:
+        _fail(
+            f"{where}: unexpected key(s) {', '.join(repr(k) for k in extra)}; "
+            f"allowed keys are {', '.join(repr(k) for k in keys)}"
+        )
+
+
 def _expect_str(value, where: str) -> None:
     if not _is_str(value):
         _fail(f"{where} must be a string")
@@ -353,6 +369,30 @@ def validate_report(data, mode: str = "static") -> None:
                     f"{at}: resolved finding's latest verification is not 'addressed'"
                 )
 
+        # --- schema-v2 optional provenance -------------------------------- #
+        # reporting.md documents both fields as optional-but-typed on a v2
+        # finding. An unvalidated optional field is worse than an absent one:
+        # the renderer and the READY gate read it as if it were trustworthy.
+        if version == 2:
+            if "anchor" in finding:
+                anchor = finding["anchor"]
+                # Explicitly nullable: a v1 finding migrated forward has no
+                # anchor, and inventing one would fabricate provenance.
+                if anchor is not None:
+                    _validate_target(anchor, f"{at}.anchor")
+            if "source_comment_ids" in finding:
+                sources = finding["source_comment_ids"]
+                _expect_list(sources, f"{at}.source_comment_ids")
+                seen_sources: set = set()
+                for s_index, comment_id in enumerate(sources):
+                    sat = f"{at}.source_comment_ids[{s_index}]"
+                    _expect_nonempty_str(comment_id, sat)
+                    if comment_id in seen_sources:
+                        _fail(
+                            f"{at}.source_comment_ids: duplicate id {comment_id!r}"
+                        )
+                    seen_sources.add(comment_id)
+
     # --- approvals --------------------------------------------------------- #
     for index, approval in enumerate(data["approvals"]):
         at = f"approvals[{index}]"
@@ -409,10 +449,17 @@ def validate_report(data, mode: str = "static") -> None:
         _expect_str(event["body"], f"{at}.body")
         if event["snapshot_id"] is not None and event["snapshot_id"] not in snapshot_ids:
             _fail(f"{at}.snapshot_id {event['snapshot_id']!r} is unknown")
+        # Optional explicit join into events.jsonl (see _timeline_times). An
+        # entry without it falls back to the positional contract, so it stays
+        # optional; a non-integer is a typo that must not ride along as "no
+        # timestamp" with no explanation.
+        if "event_seq" in event and event["event_seq"] is not None:
+            _expect_int(event["event_seq"], f"{at}.event_seq")
 
     finding_ids = {f["id"] for f in data["findings"]}
     if version == 2:
-        _validate_feedback(data, participant_ids, snapshot_ids, finding_ids)
+        roles = {p["id"]: p["role"] for p in data["participants"]}
+        _validate_feedback(data, participant_ids, roles, snapshot_ids, finding_ids)
 
     # --- READY_FOR_HUMAN gate ---------------------------------------------- #
     if data["status"] == "READY_FOR_HUMAN":
@@ -431,11 +478,14 @@ def _validate_target(target, where: str) -> None:
     _expect_nonempty_str(target[field], f"{where}.{field}")
 
 
-def _validate_feedback(data, participant_ids: set, snapshot_ids: set, finding_ids: set) -> None:
+def _validate_feedback(data, participant_ids: set, roles: dict,
+                       snapshot_ids: set, finding_ids: set) -> None:
     """Validate the schema-v2 ``feedback`` projection.
 
     Human comments are a collection separate from participants, findings and
     approvals: a human is never a reviewer, never an owner, never an approver.
+    ``roles`` maps participant id -> role, so a decision can be held to the
+    controller role rather than to mere membership.
     """
     feedback = data["feedback"]
     if not _is_dict(feedback):
@@ -448,6 +498,9 @@ def _validate_feedback(data, participant_ids: set, snapshot_ids: set, finding_id
             "\"decisions\": [], \"receipts\": []}"
         )
     _require_keys(feedback, FEEDBACK_TOP_KEYS, "feedback")
+    # Exact-set, not just "contains": an extra key here is never inert, it is a
+    # field the controller meant to write under a different name.
+    _reject_extra_keys(feedback, FEEDBACK_TOP_KEYS, "feedback")
     _expect_int(feedback["revision"], "feedback.revision")
     _expect_str(feedback["current_view_id"], "feedback.current_view_id")
     for key in ("views", "threads", "comments", "decisions", "receipts"):
@@ -500,6 +553,14 @@ def _validate_feedback(data, participant_ids: set, snapshot_ids: set, finding_id
             _fail(f"{at}.disposition must be one of {DECISION_DISPOSITIONS}")
         if decision["controller"] not in participant_ids:
             _fail(f"{at}.controller {decision['controller']!r} is not a known participant")
+        if roles.get(decision["controller"]) != "controller":
+            # Membership alone is not enough: only the controller may dispose of
+            # a human comment. Otherwise a reviewer or developer id satisfies
+            # the check and the disposition looks legitimate in the report.
+            _fail(
+                f"{at}.controller {decision['controller']!r} is not a participant "
+                "with role 'controller'"
+            )
         _expect_str(decision["rationale"], f"{at}.rationale")
         snapshot = decision["snapshot_id"]
         if snapshot is not None:
@@ -760,6 +821,28 @@ details.fileitem[open] > summary.filerow { scroll-margin-top: calc(var(--filerow
 .fs-resolved { color: var(--green); }
 .fs-open { color: var(--red); }
 .fs-awaiting_verification { color: var(--yellow); }
+.fs-recorded { color: var(--accent); }
+/* Imported human feedback. These rules live in the BASE stylesheet, not in the
+   interactive-only _FEEDBACK_CSS: an imported comment is server-rendered, so it
+   must be styled in static mode too. Only the comment *controls* (bar, editor,
+   draft cards) belong to the interactive stylesheet. */
+.role-human { background: #2b2411; color: var(--yellow); border-color: #9e6a03; }
+.fb-thread { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; background: var(--panel-2); }
+.fb-thread-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.fb-comment { border-left: 2px solid var(--border); padding: 4px 0 12px 14px; margin-left: 4px; }
+.fb-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 3px; }
+.fb-body, .fb-rationale { font-size: 16px; }
+/* The controller's reply is badged like every other speaker in the report. Plain
+   `Controller: …` prose carried the same weight as the comment it answered and
+   left the reader to parse a prefix to see who was talking. */
+.fb-rationale { display: flex; gap: 8px; align-items: baseline; color: var(--muted); margin-top: 6px; }
+.fb-rationale .badge { flex: 0 0 auto; }
+.fb-reply { min-width: 0; overflow-wrap: anywhere; }
+.fdisp { font-size: 14px; font-weight: 700; border-radius: 999px; padding: 0 8px; border: 1px solid var(--border); }
+.fd-recorded { color: var(--green); }
+.fd-fix_required { color: var(--yellow); }
+.fd-needs_clarification { color: var(--red); }
+.fd-pending { color: var(--muted); }
 .finding { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; background: var(--panel-2); }
 .finding-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .field { margin: 6px 0; }
@@ -1201,12 +1284,73 @@ def _build_view(data, interactive: bool) -> dict:
     }
 
 
-def _target_label(target) -> str:
+def _file_paths_by_id(view) -> dict:
+    """``file_id -> path`` for the rendered view (empty without a view)."""
+    if view is None:
+        return {}
+    return {file_id: path for path, file_id in view["files"].items()}
+
+
+def _target_path(target, data=None, view=None):
+    """The changed-file path a feedback target anchors to, or ``None``.
+
+    Resolving a target back to its file is what lets an imported comment be
+    shown beside the diff it is about instead of only in the Conversation log.
+    A ``thread`` target that names a review finding resolves through it.
+    """
+    kind = target.get("kind")
+    if kind == "file":
+        return _file_paths_by_id(view).get(target.get("file_id"))
+    if kind == "line":
+        if view is None:
+            return None
+        for (path, _side, _line), anchor_id in view["lines"].items():
+            if anchor_id == target.get("anchor_id"):
+                return path
+        return None
+    if kind == "thread":
+        if data is None:
+            return None
+        thread_id = str(target.get("thread_id") or "")
+        prefix = "finding/"
+        if not thread_id.startswith(prefix):
+            return None
+        wanted = thread_id[len(prefix):]
+        for finding in data["findings"]:
+            if finding["id"] == wanted:
+                return finding["path"]
+        return None
+    return None
+
+
+def _target_label(target, data=None, view=None) -> str:
+    """Name a feedback target by where it is, not by the id that encodes it.
+
+    A resolvable target reads as ``.gitattributes`` or ``src/widget.py:12``.
+    The raw ``file-<64 hex>`` / anchor-id form is kept only as a fallback: an
+    anchor that no longer resolves must stay *visibly* unidentified rather than
+    be silently dressed up as something it is not.
+    """
     kind = target["kind"]
     if kind == "line":
-        return "line " + str(target["anchor_id"])
+        anchor_id = str(target["anchor_id"])
+        if view is not None:
+            for anchor in view["manifest"]["line_anchors"]:
+                if anchor["anchor_id"] == anchor_id:
+                    return f'{anchor["path"]}:{anchor["line"]}'
+        return "line " + anchor_id
     if kind == "thread":
-        return "thread " + str(target["thread_id"])
+        thread_id = str(target["thread_id"])
+        path = _target_path(target, data, view)
+        if path is not None:
+            for finding in (data["findings"] if data else []):
+                if "finding/" + finding["id"] == thread_id:
+                    return f'{path}:{finding["line"]}'
+            return path
+        return "thread " + thread_id
+    path = _target_path(target, data, view)
+    if path is not None:
+        return path
     return "file " + str(target["file_id"])
 
 
@@ -1234,18 +1378,6 @@ _FEEDBACK_CSS = """
 .fbbar .fbstatus-ok { color: var(--green); }
 .fbbar .fbstatus-error { color: var(--red); }
 .fbbar .fbstatus-warn { color: var(--yellow); }
-.role-human { background: #2b2411; color: var(--yellow); border-color: #9e6a03; }
-.fb-thread { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 12px 0; background: var(--panel-2); }
-.fb-thread-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-.fb-comment { border-left: 2px solid var(--border); padding: 4px 0 12px 14px; margin-left: 4px; }
-.fb-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 3px; }
-.fb-body, .fb-rationale { font-size: 16px; }
-.fb-rationale { color: var(--muted); margin-top: 4px; }
-.fdisp { font-size: 14px; font-weight: 700; border-radius: 999px; padding: 0 8px; border: 1px solid var(--border); }
-.fd-recorded { color: var(--green); }
-.fd-fix_required { color: var(--yellow); }
-.fd-needs_clarification { color: var(--red); }
-.fd-pending { color: var(--muted); }
 .dl-addressable { position: relative; }
 .dl-gutter { flex: 0 0 auto; width: 1.6em; text-align: center; }
 .diffview .dl:hover .fb-btn-gutter { color: var(--accent); border-color: var(--accent); }
@@ -1285,65 +1417,98 @@ def _script_csp_hash(script_text: str) -> str:
     return "sha256-" + base64.b64encode(digest).decode("ascii")
 
 
-def _render_feedback(data) -> str:
-    """Render the imported human feedback collection (schema v2 only)."""
+def _latest_decisions(feedback) -> dict:
+    """``comment_id -> latest decision``; a later decision replaces an earlier one."""
+    latest: dict = {}
+    if isinstance(feedback, dict):
+        for decision in feedback.get("decisions", []):
+            latest[decision["comment_id"]] = decision
+    return latest
+
+
+def _comments_by_thread(feedback) -> dict:
+    """``thread_id -> [comment, ...]`` preserving the recorded order."""
+    by_thread: dict = {}
+    if isinstance(feedback, dict):
+        for comment in feedback.get("comments", []):
+            by_thread.setdefault(comment["thread_id"], []).append(comment)
+    return by_thread
+
+
+def _fb_comment_row(comment, decision, data=None, view=None) -> str:
+    """One imported human comment with the controller's disposition and reply.
+
+    Shared by the per-file view and the Conversation log, so the two can never
+    disagree about what the controller answered. The clock is rendered in the
+    reader's own timezone -- a raw ``…Z`` value in the header is exactly the
+    thing the reader would otherwise have to convert by hand.
+    """
+    if decision is None:
+        disp = '<span class="fdisp fd-pending">pending</span>'
+        reply = ""
+    else:
+        disp = (f'<span class="fdisp fd-{_dom_id(decision["disposition"])}">'
+                f'{_esc(decision["disposition"])}</span>')
+        reply = _controller_reply(decision)
+    return (
+        '<li class="fb-comment">'
+        '<div class="fb-head">'
+        f'{_badge("Human (imported)", "role-human")}{disp}'
+        f'<span class="mono muted">{_esc(comment["id"])}</span>'
+        f'<span class="mono muted">{_esc(_target_label(comment["target"], data, view))}</span>'
+        f'{_ts_display(comment["received_at"])}'
+        "</div>"
+        f'<div class="fb-body">{_esc(comment["body"])}</div>'
+        f"{reply}"
+        "</li>"
+    )
+
+
+def _fb_thread_article(thread, comments, latest, data=None, view=None) -> str:
+    """One imported human thread inside a file row: comments + controller replies.
+
+    Deliberately id-less. The Conversation log's row is the jump target the rail
+    links to, and two elements may not share an id.
+    """
+    rows = [
+        _fb_comment_row(comment, latest.get(comment["id"]), data, view)
+        for comment in comments
+    ]
+    body = (
+        '<ol class="timeline">' + "".join(rows) + "</ol>"
+        if rows else '<p class="empty">No comments.</p>'
+    )
+    status = thread["status"]
+    return (
+        '<article class="fb-thread">'
+        '<div class="fb-thread-head">'
+        f'<span class="mono">{_esc(thread["id"])}</span>'
+        f'<span class="fstatus fs-{_dom_id(status)}">{_esc(status)}</span>'
+        f'<span class="mono muted">{_esc(_target_label(thread["target"], data, view))}</span>'
+        "</div>" + body + "</article>"
+    )
+
+
+def _human_threads_by_path(data, view) -> dict:
+    """Imported human threads grouped by the changed-file path they target.
+
+    A reviewer leaves a comment from the Files panel (``#file-<n>`` deep-links
+    land there), and importing it clears the draft from localStorage. Without
+    this grouping the reviewer's own comment and the controller's reply both
+    disappear from the panel they were written in, and only survive in the
+    Conversation log the deep link never showed them.
+    """
     feedback = data.get("feedback")
     if not isinstance(feedback, dict):
-        return ""
-    comments = feedback.get("comments", [])
-    threads = feedback.get("threads", [])
-    decisions = feedback.get("decisions", [])
-    if not comments and not threads:
-        return _section("Human feedback", '<p class="empty">No human feedback imported.</p>')
-
-    latest: dict = {}
-    for decision in decisions:
-        latest[decision["comment_id"]] = decision
-    by_thread: dict = {}
-    for comment in comments:
-        by_thread.setdefault(comment["thread_id"], []).append(comment)
-
-    items = []
-    for thread in threads:
-        rows = []
-        for comment in by_thread.get(thread["id"], []):
-            decision = latest.get(comment["id"])
-            if decision is None:
-                disp = '<span class="fdisp fd-pending">pending</span>'
-                rationale = ""
-            else:
-                disposition = decision["disposition"]
-                disp = f'<span class="fdisp fd-{_dom_id(disposition)}">{_esc(disposition)}</span>'
-                rationale = (
-                    f'<div class="fb-rationale">Controller: {_esc(decision["rationale"])}</div>'
-                    if decision["rationale"] else ""
-                )
-            rows.append(
-                '<li class="fb-comment">'
-                '<div class="fb-head">'
-                f'{_badge("Human (imported)", "role-human")}{disp}'
-                f'<span class="mono muted">{_esc(comment["id"])}</span>'
-                f'<span class="mono muted">{_esc(_target_label(comment["target"]))}</span>'
-                f'<span class="mono muted">{_esc(comment["received_at"])}</span>'
-                "</div>"
-                f'<div class="fb-body">{_esc(comment["body"])}</div>'
-                f"{rationale}"
-                "</li>"
-            )
-        body = (
-            '<ol class="timeline">' + "".join(rows) + "</ol>"
-            if rows else '<p class="empty">No comments.</p>'
-        )
-        status = thread["status"]
-        items.append(
-            '<article class="fb-thread">'
-            '<div class="fb-thread-head">'
-            f'<span class="mono">{_esc(thread["id"])}</span>'
-            f'<span class="fstatus fs-{_dom_id(status)}">{_esc(status)}</span>'
-            f'<span class="mono muted">{_esc(_target_label(thread["target"]))}</span>'
-            "</div>" + body + "</article>"
-        )
-    return _section("Human feedback", "".join(items))
+        return {}
+    by_thread = _comments_by_thread(feedback)
+    grouped: dict = {}
+    for thread in feedback.get("threads", []):
+        path = _target_path(thread["target"], data, view)
+        if path is None:
+            continue  # unresolvable anchor: still listed in the Conversation log
+        grouped.setdefault(path, []).append((thread, by_thread.get(thread["id"], [])))
+    return grouped
 
 
 def _render_feedback_bar(data, view, mode: str) -> str:
@@ -1402,68 +1567,221 @@ def _render_participants(data) -> str:
     return _section("Participants", body)
 
 
-def _timeline_times(events):
-    """Map each timeline entry's position to its ``ts`` from ``events.jsonl``.
+def _timeline_times(timeline, events):
+    """Resolve each timeline entry's ``ts`` from the ``events.jsonl`` log.
 
     ``report.json`` timeline entries carry no timestamp; the authoritative clock
-    is ``events.jsonl``'s ``ts`` (UTC ISO-8601). The two lists are written in the
-    same order for the same task, so position is the join key. Entries are
-    returned padded to the timeline length with ``None`` where no time is known,
-    so a shorter or absent event log degrades to "no timestamp" rather than
-    losing an entry.
+    is ``events.jsonl``'s ``ts`` (UTC ISO-8601). Two joins are supported:
+
+    * **Explicit** -- an entry carrying ``event_seq`` takes the ``ts`` of the
+      event with that ``seq``, whatever the positions are. This is the only
+      join that survives a log holding coordination events the timeline does
+      not summarise (dispatches, tab resets, receipts).
+    * **Positional** -- with no ``event_seq``, entry *i* takes event *i*: the
+      original contract, where the timeline is a prefix of the log. It is kept
+      as a fallback for records written before ``event_seq`` existed.
+
+    The positional fallback is only trusted while the log is **no longer** than
+    the timeline. A longer log proves the timeline omits events and says nothing
+    about where, so position stops being a join key: unstamped entries get no
+    time at all. That is the documented promise ("a bad log degrades to no
+    timestamps") -- the previous code silently borrowed the neighbouring row's
+    clock instead (observed 2026-10-15: 9 events against 8 entries put the
+    human-feedback row at the check-run's time).
+
+    An entry whose ``event_seq`` does not resolve also gets **no** time, never a
+    positional guess: a wrong time presented as a fact is worse than an absent
+    one. The result is padded to the timeline length with ``None``.
     """
-    times = []
+    by_seq = {}
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        seq = event.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            by_seq[seq] = event
+
+    positional = []
     for event in events or []:
         ts = event.get("ts") if isinstance(event, dict) else None
+        positional.append(ts if isinstance(ts, str) and ts.strip() else None)
+
+    positional_safe = len(positional) <= len(timeline)
+
+    times = []
+    for index, entry in enumerate(timeline):
+        seq = entry.get("event_seq") if isinstance(entry, dict) else None
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            event = by_seq.get(seq)
+            ts = event.get("ts") if isinstance(event, dict) else None
+        elif positional_safe and index < len(positional):
+            ts = positional[index]
+        else:
+            ts = None
         times.append(ts if isinstance(ts, str) and ts.strip() else None)
     return times
 
 
-def _format_ts(ts):
-    """Render a UTC ISO-8601 timestamp for display, or ``None`` if unparseable.
+def _parse_ts(ts):
+    """Parse a UTC ISO-8601 timestamp, or ``None`` if it is unusable.
 
     Deliberately stdlib-only and tolerant: an unparseable timestamp must never
-    break the report, it just means this one entry shows no time.
+    break the report, it just means that one entry shows no time (and, for the
+    human-comment clock, sorts after everything that does).
     """
-    if not ts:
+    if not ts or not isinstance(ts, str):
         return None
     text = ts.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        stamp = datetime.datetime.fromisoformat(text)
+        return datetime.datetime.fromisoformat(text)
     except ValueError:
+        return None
+
+
+def _format_ts(ts):
+    """Render a UTC ISO-8601 timestamp in the reader's own clock, or ``None``.
+
+    Every timestamp the report displays goes through here, so a reader never has
+    to convert a raw `…Z` value in their head. The machine-readable UTC form is
+    kept alongside it in the `<time datetime>` attribute.
+    """
+    stamp = _parse_ts(ts)
+    if stamp is None:
         return None
     if stamp.tzinfo is not None:
         stamp = stamp.astimezone()  # show the reviewer's local clock
     return stamp.strftime("%d %b %Y, %H:%M")
 
 
-def _render_timeline(data, events=None) -> str:
-    actors = _actors_map(data)
-    times = _timeline_times(events)
+def _ts_display(ts) -> str:
+    """A ``<time>`` for a timestamp, falling back to the raw value verbatim.
+
+    Showing the unparsed string beats showing nothing: a malformed clock is a
+    data defect the reader should see, not one to hide behind a blank cell.
+    """
+    display = _format_ts(ts)
+    if not display:
+        return f'<span class="mono muted">{_esc(ts)}</span>'
+    return (f'<time class="tl-when" datetime="{_esc(ts)}">{_esc(display)}</time>')
+
+
+def _timeline_order(ts, index):
+    """Chronological sort key; a row with no usable clock keeps its order, last."""
+    stamp = _parse_ts(ts)
+    if stamp is None:
+        return (1, 0.0, index)
+    return (0, stamp.timestamp(), index)
+
+
+def _controller_reply(decision) -> str:
+    """The controller's answer to a human comment, badged like every other actor.
+
+    Plain ``Controller: …`` prose carried the same weight as the comment it
+    answered, and the reader had to parse the prefix to work out who was
+    speaking. The role badge is what the rest of the report already uses for
+    that, and it is what makes the reply scannable next to the comment.
+    """
+    if not decision["rationale"]:
+        return ""
+    return (
+        '<div class="fb-rationale">'
+        f'{_badge("Controller", "role-controller")}'
+        f'<span class="fb-reply">{_esc(decision["rationale"])}</span></div>'
+    )
+
+
+def _timeline_item(event, actors, ts) -> str:
+    """One controller-authored timeline row."""
+    snapshot = event["snapshot_id"]
+    if snapshot is None:
+        snapshot_html = '<span class="muted">no snapshot</span>'
+    else:
+        snapshot_html = f'<span class="mono muted">{_esc(snapshot)}</span>'
+    when = _ts_display(ts) if ts else ""
+    return (
+        f'<li class="tl-item tl-{_kind_tone(event["kind"])}">'
+        f'<div class="tl-head">{_actor_html(actors, event["actor"])}'
+        f'{_kind_chip(event["kind"])}{snapshot_html}{when}</div>'
+        f'<div class="tl-body">{_esc(event["body"])}</div>'
+        "</li>"
+    )
+
+
+def _human_timeline_item(thread, comment, decision, data, view, anchor) -> str:
+    """One imported human comment as a Conversation-timeline row.
+
+    The comment, its target and the controller's reply travel together, so the
+    log answers "what did the human say, and what happened to it" in one place.
+    ``anchor`` puts the thread's jump id on its **first** row only: the Files
+    panel's rail links there, and two rows may not share an id.
+    """
+    attrs = f' id="{_esc("fb-" + _dom_id(thread["id"]))}"' if anchor else ""
+    if decision is None:
+        disp = '<span class="fdisp fd-pending">pending</span>'
+        reply = ""
+    else:
+        disp = (f'<span class="fdisp fd-{_dom_id(decision["disposition"])}">'
+                f'{_esc(decision["disposition"])}</span>')
+        reply = _controller_reply(decision)
+    return (
+        f'<li class="tl-item tl-yellow"{attrs}>'
+        '<div class="tl-head">'
+        f'{_badge("Human (imported)", "role-human")}{disp}'
+        f'<span class="mono muted">{_esc(thread["id"])}</span>'
+        f'<span class="mono muted">{_esc(_target_label(comment["target"], data, view))}</span>'
+        f'{_ts_display(comment["received_at"])}</div>'
+        f'<div class="tl-body">{_esc(comment["body"])}{reply}</div>'
+        "</li>"
+    )
+
+
+def _human_timeline_items(data, view) -> list:
+    """``(ts, html)`` for every imported human comment, in recorded order."""
+    feedback = data.get("feedback")
+    if not isinstance(feedback, dict):
+        return []
+    latest = _latest_decisions(feedback)
+    by_thread = _comments_by_thread(feedback)
     items = []
+    for thread in feedback.get("threads", []):
+        for offset, comment in enumerate(by_thread.get(thread["id"], [])):
+            items.append((
+                comment["received_at"],
+                _human_timeline_item(thread, comment, latest.get(comment["id"]),
+                                     data, view, anchor=(offset == 0)),
+            ))
+    return items
+
+
+def _human_comment_count(data) -> int:
+    """How many imported human comments the log will carry."""
+    feedback = data.get("feedback")
+    if not isinstance(feedback, dict):
+        return 0
+    return len(feedback.get("comments", []))
+
+
+def _render_timeline(data, view=None, events=None) -> str:
+    """The Conversation log: controller actions **and** imported human comments.
+
+    Human comments are rows in this list rather than a section of their own, so
+    the page holds one chronological record of the task instead of a log plus a
+    parallel comment table. They merge by clock, so a comment lands where it
+    happened; anything without a usable clock keeps its recorded order after the
+    timestamped rows.
+    """
+    actors = _actors_map(data)
+    times = _timeline_times(data["timeline"], events)
+    rows = []
     for index, event in enumerate(data["timeline"]):
-        snapshot = event["snapshot_id"]
-        if snapshot is None:
-            snapshot_html = '<span class="muted">no snapshot</span>'
-        else:
-            snapshot_html = f'<span class="mono muted">{_esc(snapshot)}</span>'
-        when = ""
-        if index < len(times):
-            display = _format_ts(times[index])
-            if display:
-                # <time datetime> keeps the machine-readable UTC value alongside
-                # the human-readable local one.
-                when = (f'<time class="tl-when" datetime="{_esc(times[index])}">'
-                        f"{_esc(display)}</time>")
-        items.append(
-            f'<li class="tl-item tl-{_kind_tone(event["kind"])}">'
-            f'<div class="tl-head">{_actor_html(actors, event["actor"])}'
-            f'{_kind_chip(event["kind"])}{snapshot_html}{when}</div>'
-            f'<div class="tl-body">{_esc(event["body"])}</div>'
-            "</li>"
-        )
+        ts = times[index] if index < len(times) else None
+        rows.append((ts, index, _timeline_item(event, actors, ts)))
+    for offset, (ts, html) in enumerate(_human_timeline_items(data, view)):
+        rows.append((ts, len(data["timeline"]) + offset, html))
+    rows.sort(key=lambda row: _timeline_order(row[0], row[1]))
+    items = [row[2] for row in rows]
     if not items:
         return _section("Conversation timeline", '<p class="empty">No timeline entries.</p>')
     return _section("Conversation timeline", '<ol class="timeline">' + "".join(items) + "</ol>")
@@ -1770,7 +2088,7 @@ def _file_row(index, path, added, removed, n_comments, diff_html, comment_html,
     count = ""
     if n_comments:
         plural = "" if n_comments == 1 else "s"
-        count = (f'<span class="cc" title="{n_comments} review comment{plural}">'
+        count = (f'<span class="cc" title="{n_comments} comment{plural}">'
                  f"{n_comments}</span>")
     opened = " open" if index == 0 else ""
     return (
@@ -1789,11 +2107,36 @@ def _file_row(index, path, added, removed, n_comments, diff_html, comment_html,
     )
 
 
+def _file_comments_html(findings, human, actors, data, view) -> str:
+    """Everything the Files panel shows under one file's diff.
+
+    Review findings come first (they are the review of record), then the
+    imported human threads targeting this file, each with the controller's
+    disposition and reply.
+    """
+    parts = [_finding_article(f, actors, view) for f in findings]
+    if human:
+        latest = _latest_decisions(data.get("feedback"))
+        for thread, comments in human:
+            parts.append(
+                _fb_thread_article(thread, comments, latest, data, view)
+            )
+    if not parts:
+        return '<p class="empty">No review comments on this file.</p>'
+    return "".join(parts)
+
+
+def _count_human_comments(human) -> int:
+    """Imported comments on one file (a thread may hold more than one)."""
+    return sum(len(comments) for _thread, comments in human)
+
+
 def _render_files_changed(data, view=None) -> str:
-    """Review threads & changes: each file's diff with its reviewers' comments."""
+    """Review threads & changes: each file's diff with its comments."""
     findings_by_path = {}
     for finding in data["findings"]:
         findings_by_path.setdefault(finding["path"], []).append(finding)
+    human_by_path = _human_threads_by_path(data, view)
     actors = _actors_map(data)
 
     blocks = []
@@ -1809,31 +2152,33 @@ def _render_files_changed(data, view=None) -> str:
         added_total += added
         removed_total += removed
         comments = findings_by_path.get(path, [])
-        if comments:
-            comment_html = "".join(_finding_article(f, actors, view) for f in comments)
-        else:
-            comment_html = '<p class="empty">No review comments on this file.</p>'
-        blocks.append(_file_row(index, path, added, removed, len(comments),
-                                  _diff_block(change["diff"], view, path), comment_html,
+        human = human_by_path.get(path, [])
+        n_comments = len(comments) + _count_human_comments(human)
+        blocks.append(_file_row(index, path, added, removed, n_comments,
+                                  _diff_block(change["diff"], view, path),
+                                  _file_comments_html(comments, human, actors, data, view),
                                   view))
         row_index.append({"index": index, "path": path, "added": added,
-                          "removed": removed, "comments": len(comments)})
+                          "removed": removed, "comments": n_comments})
         index += 1
 
-    # Never hide a comment: surface findings whose path has no diff entry.
-    for path in sorted(p for p in findings_by_path if p not in seen_paths):
-        comment_html = "".join(
-            _finding_article(f, actors, view) for f in findings_by_path[path]
-        )
-        blocks.append(_file_row(index, path, None, None,
-                                  len(findings_by_path[path]), "", comment_html, view))
+    # Never hide a comment: surface any thread whose path has no diff entry.
+    for path in sorted((set(findings_by_path) | set(human_by_path)) - seen_paths):
+        comments = findings_by_path.get(path, [])
+        human = human_by_path.get(path, [])
+        n_comments = len(comments) + _count_human_comments(human)
+        blocks.append(_file_row(index, path, None, None, n_comments, "",
+                                _file_comments_html(comments, human, actors, data, view),
+                                view))
         row_index.append({"index": index, "path": path, "added": None,
-                          "removed": None, "comments": len(findings_by_path[path])})
+                          "removed": None, "comments": n_comments})
         index += 1
 
     if not blocks:
         return _section("Review threads & changes", '<p class="empty">No changes.</p>')
-    n_comments = len(data["findings"])
+    n_comments = len(data["findings"]) + _count_human_comments(
+        [item for threads in human_by_path.values() for item in threads]
+    )
     summary = (
         '<p class="ftsummary">'
         f'{len(blocks)} file{"s" if len(blocks) != 1 else ""} changed · '
@@ -1842,7 +2187,7 @@ def _render_files_changed(data, view=None) -> str:
     )
     # Row order defines the anchor numbering, so the rail is derived from the
     # same ordered list the rows were built from -- never a second guess at it.
-    rail = _files_rail(row_index, data, actors)
+    rail = _files_rail(row_index, data, actors, human_by_path)
     return _section(
         "Review threads & changes",
         '<div class="files-layout">'
@@ -1852,13 +2197,17 @@ def _render_files_changed(data, view=None) -> str:
     )
 
 
-def _files_rail(rows, data, actors) -> str:
-    """The sticky side rail: every file, then every review comment.
+def _files_rail(rows, data, actors, human_by_path=None) -> str:
+    """The sticky side rail: every file, then every comment.
 
     Both panels are plain anchor lists and navigate with the browser's own
     fragment handling, so this stays script-free. Every target id is emitted
     unconditionally by ``_file_row``/``_finding_article``, which is what makes
     the jumps resolve in static mode too.
+
+    Imported human threads are listed after the review findings: they jump to
+    the Conversation log's copy (``#fb-…``), which is the only copy carrying an
+    id, so the rail never points at a duplicate.
     """
     if not rows:
         return ""
@@ -1874,7 +2223,7 @@ def _files_rail(rows, data, actors) -> str:
         badge = ""
         if row["comments"]:
             plural = "" if row["comments"] == 1 else "s"
-            badge = (f'<span class="fcmt" title="{row["comments"]} review '
+            badge = (f'<span class="fcmt" title="{row["comments"]} '
                      f'comment{plural}">{row["comments"]}</span>')
             cls = ' class="has-cmt"'
         else:
@@ -1903,6 +2252,16 @@ def _files_rail(rows, data, actors) -> str:
             f'<span class="jpath">{_esc(finding["path"])}:'
             f'{_esc(finding["line"])}</span></a></li>'
         )
+    for path in sorted(human_by_path or {}):
+        for thread, _comments in human_by_path[path]:
+            comment_rows.append(
+                f'<li><a href="#{_esc("fb-" + _dom_id(thread["id"]))}" '
+                f'title="{_esc(path)}">'
+                '<span class="jtop"><span class="jsev sev-low">human</span>'
+                f'{_badge("Human (imported)", "role-human")}'
+                f'<span class="jid">{_esc(thread["id"])}</span></span>'
+                f'<span class="jpath">{_esc(path)}</span></a></li>'
+            )
 
     if comment_rows:
         comments_panel = (
@@ -2127,7 +2486,8 @@ def _render_page_tabs(data, view, mode: str, events=None) -> str:
     must not be wrapped in a container: a wrapper makes the panels cousins and
     both the highlight rule and the visibility rule silently stop matching.
     """
-    n_timeline = len(data["timeline"])
+    # Imported human comments are rows in the log, so the tab counter counts them.
+    n_timeline = len(data["timeline"]) + _human_comment_count(data)
     n_files = len(data["changes"])
     added = removed = 0
     for change in data["changes"]:
@@ -2145,8 +2505,7 @@ def _render_page_tabs(data, view, mode: str, events=None) -> str:
     conversation = "".join([
         _render_requirements(data),
         _render_participants(data),
-        _render_timeline(data, events),
-        _render_feedback(data),
+        _render_timeline(data, view, events),
         _render_checks(data),
         _render_approvals(data),
     ])

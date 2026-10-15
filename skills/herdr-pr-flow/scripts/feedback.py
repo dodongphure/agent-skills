@@ -296,6 +296,37 @@ def stage_envelope(real_dir: str, batch_id: str, envelope_text: str) -> str:
     return target
 
 
+def projected_view_id(data):
+    """The view id the report *projects*, from the report alone.
+
+    ``feedback.current_view_id`` in ``report.json`` is only a cache the
+    controller maintains after importing a batch. On the initial handoff it is
+    still ``""`` even though the rendered report is current, because
+    ``render_report.write_report`` names ``views/<id>.json`` and stamps
+    ``data-view-id`` on the page without rewriting ``report.json`` (which stays
+    the controller's file). Reading the cache alone therefore reported a freshly
+    rendered report as stale.
+
+    The projection is recomputed from the same inputs the renderer used, so it
+    matches the page byte-for-byte without needing ``report.html`` or any
+    manifest on disk. Returns ``None`` when the renderer cannot be consulted, so
+    the caller degrades to the cache rather than to a wrong answer.
+    """
+    try:
+        import render_report
+    except ImportError:  # pragma: no cover - renderer is bundled with the skill
+        return None
+    try:
+        view = render_report._build_view(data, interactive=True)
+    except Exception:
+        return None
+    manifest = view.get("manifest") if isinstance(view, dict) else None
+    if not isinstance(manifest, dict):
+        return None
+    view_id = manifest.get("view_id")
+    return view_id if isinstance(view_id, str) and view_id else None
+
+
 def current_view_id(real_dir: str):
     """The view the report currently projects, or None when unavailable."""
     path = os.path.join(real_dir, "report.json")
@@ -306,10 +337,14 @@ def current_view_id(real_dir: str):
             data = load_json(handle.read())
     except (OSError, FeedbackError):
         return None
-    feedback = data.get("feedback") if isinstance(data, dict) else None
-    if isinstance(feedback, dict):
-        return feedback.get("current_view_id")
-    return None
+    if not isinstance(data, dict):
+        return None
+    feedback = data.get("feedback")
+    cached = feedback.get("current_view_id") if isinstance(feedback, dict) else None
+    if isinstance(cached, str) and cached:
+        return cached
+    # No usable cache: derive it from the report the same way the renderer did.
+    return projected_view_id(data)
 
 
 def main() -> int:

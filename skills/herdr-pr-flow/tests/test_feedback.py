@@ -187,8 +187,95 @@ class FeedbackTests(unittest.TestCase):
             feedback.stage_envelope(self.task_dir, "b-1", json.dumps(self.envelope(body="other")))
 
     def test_stale_view_is_flagged_not_rejected(self):
-        self.assertEqual(feedback.current_view_id(self.task_dir), None)
+        """A v1 report has no feedback block to cache a view, so it is not stale.
+
+        The envelope is still validated: an unknown "current view" is a warning
+        for the reviewer, never a reason to reject their comment.
+        """
+        self.assertEqual(feedback.current_view_id(self.task_dir), self.view_id)
         self.assertTrue(feedback.validate_envelope(self.envelope(), self.manifest))
+
+    def _fresh_v2_task(self):
+        """A task whose report.json carries an empty (un-imported) feedback cache."""
+        root = tempfile.mkdtemp(prefix="herdr-fresh-v2-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        task_dir = os.path.join(root, ".agent-pr", "tasks", "task-001")
+        os.makedirs(task_dir)
+        with open(os.path.join(task_dir, "workflow.resolved.json"), "w", encoding="utf-8") as handle:
+            json.dump(test_interactive.v2_config(mode="live", port=8765), handle)
+        data = test_interactive.with_hunk()
+        data["status"] = "REVIEWING"
+        data["schema_version"] = 2
+        data["feedback"] = {
+            "revision": 0, "current_view_id": "", "views": [], "threads": [],
+            "comments": [], "decisions": [], "receipts": [],
+        }
+        with open(os.path.join(task_dir, "report.json"), "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        render_report.write_report(task_dir)
+        return task_dir
+
+    def test_freshly_rendered_report_is_not_stale(self):
+        """A current report must not report stale on its initial handoff.
+
+        Regression: ``write_report`` names ``views/<id>.json`` and stamps
+        ``data-view-id`` on the page without rewriting ``report.json`` - that
+        file belongs to the controller - so on a fresh task
+        ``feedback.current_view_id`` is still ``""`` while the rendered view is
+        current. Comparing the two produced ``"stale": true`` on an up-to-date
+        report. The projection is now recomputed from the report itself.
+        """
+        task_dir = self._fresh_v2_task()
+        with open(os.path.join(task_dir, "report.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["feedback"]["current_view_id"], "")
+        rendered = [
+            name[:-5] for name in os.listdir(os.path.join(task_dir, "views"))
+            if name.endswith(".json")
+        ]
+        self.assertEqual(len(rendered), 1)
+        # The cache is empty, yet the projection is the view on the page.
+        self.assertEqual(feedback.current_view_id(task_dir), rendered[0])
+        with open(os.path.join(task_dir, "report.html"), encoding="utf-8") as handle:
+            self.assertIn(f'data-view-id="{rendered[0]}"', handle.read())
+
+    def test_a_cached_stale_view_is_still_flagged(self):
+        """The fallback must not paper over a genuinely outdated projection.
+
+        Once the controller has imported a batch it writes the view it projected
+        into ``report.json``. That cached value wins, so a task that has moved on
+        since still reads as stale.
+        """
+        task_dir = self._fresh_v2_task()
+        current = feedback.current_view_id(task_dir)
+        path = os.path.join(task_dir, "report.json")
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        data["feedback"]["current_view_id"] = "rv-0000000000000000"
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.assertEqual(feedback.current_view_id(task_dir), "rv-0000000000000000")
+        self.assertNotEqual(current, "rv-0000000000000000")
+
+    def test_projection_degrades_to_none_without_a_report(self):
+        """No report.json is still `None` - the pre-existing contract."""
+        empty = os.path.join(self.root, ".agent-pr", "tasks", "task-002")
+        os.makedirs(empty)
+        self.assertIsNone(feedback.current_view_id(empty))
+
+    def test_projected_view_id_matches_the_written_manifest(self):
+        """`projected_view_id` must agree with the manifest the renderer wrote."""
+        task_dir = self._fresh_v2_task()
+        with open(os.path.join(task_dir, "report.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+        rendered = [
+            name[:-5] for name in os.listdir(os.path.join(task_dir, "views"))
+            if name.endswith(".json")
+        ]
+        self.assertEqual(feedback.projected_view_id(data), rendered[0])
+        # An unusable report degrades to None rather than raising.
+        self.assertIsNone(feedback.projected_view_id({}))
+        self.assertIsNone(feedback.projected_view_id("not a report"))
 
 
 class LoopbackTests(unittest.TestCase):
