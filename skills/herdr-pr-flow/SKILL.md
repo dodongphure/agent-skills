@@ -15,6 +15,7 @@ Read these references at the relevant step, not all on every task:
 - [Configuration and first-use gate](references/configuration.md)
 - [Herdr compatibility and dispatch](references/compatibility.md)
 - [Workflow and recovery](references/workflow.md)
+- [Controller efficiency and timing](references/performance.md)
 - [Report format and completion gates](references/reporting.md)
 - [Installation and usage](references/usage.md)
 - [Evaluation and limitations](references/evaluation.md)
@@ -96,6 +97,14 @@ Different CLIs alone do not prove different models; show requested vs observed I
 
 ## 3. Prepare task records and baseline
 
+Plan once at the depth the task needs: for a straightforward task, record a short
+scope/steps/checks plan, not a separate planning round. Reuse it across dispatches;
+replan only when requirements, authorized scope or new evidence changes the approach.
+The developer may work out implementation details within that approved scope; do not
+add a planner/report subagent. Complex or uncertain work still needs adequate analysis.
+Use the timing procedure in performance.md to distinguish controller overhead, worker
+waits and helper runtime; never claim a speedup without comparable measurements.
+
 After configuration and task authorization gates, create a unique task directory:
 `<project>/.agent-pr/tasks/<task-id>/`. Keep all paths in the execution environment.
 Only one task/source writer may be active in a project at a time (this is the developer;
@@ -140,8 +149,12 @@ Pause developer writes, freeze the candidate, and open one tab per configured re
 (reset any retained reviewer tab with `/new` and wait for `idle` before reusing it).
 Supply each the same requirements, baseline/candidate/diff and reviewer instructions,
 with an isolated review copy and separate writable outbox. Do not share peer findings
-until all independent initial reports arrive. Dispatch both before waiting when parallel
-execution is available; do not complete reviewer 1's full review before starting reviewer 2.
+until all independent initial reports arrive. After session readiness/reset checks,
+dispatch ALL configured reviewers before waiting for review results when parallel
+execution is available: submit each prompt without `--wait`, then
+collect with bounded waits. Do not complete reviewer 1 before starting reviewer 2.
+Apply the same fan-out to final approvals on the same frozen snapshot. If dispatch
+cannot run concurrently, record the limitation rather than claiming parallel execution.
 Concurrent reviewers share no writable state: the candidate is frozen and read-only, each
 reviewer writes only its own outbox, and only the controller appends to events.jsonl,
 state.json and report.json. Keep the developer paused until every reviewer's report is

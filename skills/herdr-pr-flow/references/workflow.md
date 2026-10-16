@@ -9,7 +9,7 @@ After valid config and authorized task scope, use `.agent-pr/tasks/<unique-task-
 - outbox/<actor>/<request-id>.json, snapshots/<label>/manifest.json and source/
 - views/<view-id>.json (immutable anchor + thread manifest; interactive modes — see retention below)
 - inbox/human/<batch-id>.json (controller-preserved raw human submission)
-- evidence/ (test output and permission notes); the diff text lives in report.json, not as files
+- evidence/ (test output, permission notes and optional diagnostic timings.jsonl); the diff text lives in report.json, not as files
 
 Check `.agent-pr/active-task.json` before source changes; only one controller task in the
 project. Do not blindly remove a stale record. Ask whether to resume/adopt; cross-process

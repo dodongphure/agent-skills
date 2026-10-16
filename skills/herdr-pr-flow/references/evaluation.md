@@ -20,7 +20,12 @@ idempotent retry vs content conflict), and the loopback server (non-loopback cli
 wrong token 403, oversized body 413, path escape refused, busy fixed port a hard error,
 same-origin POST only). The default static render is asserted byte-identical to the original.
 Real symlink cases may skip when host cannot create symlinks; mocked guards remain exercised.
-Helpers never call Herdr or providers. Unit tests use isolated disposable temp dirs only.
+Core validation/snapshot/report helpers never call Herdr or providers. The optional
+`measure.py` wrapper executes only the explicit command supplied by the controller; timing
+tests use Python child processes or mocks, never live Herdr/providers. Coverage includes
+exit propagation, diagnostic-only append/summary, malformed-line coverage reporting,
+invalid paths and link guards, log-open failure before execution, and argument validation.
+Unit tests use isolated disposable temp dirs only.
 
 ## Instruction review
 
